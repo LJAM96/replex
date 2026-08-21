@@ -43,13 +43,13 @@ pub fn route() -> Router {
                 Router::with_path(
                     "/video/<colon:colon>/transcode/universal/session/<**rest>",
                 )
-                .goal(redirect_stream),
+                .goal(protected_redirect_stream),
             )
             .push(
                 Router::with_path(
                     "/library/parts/<itemid>/<partid>/file.<extension>",
                 )
-                .goal(redirect_stream),
+                .goal(protected_redirect_stream),
             );
     }
 
@@ -297,6 +297,10 @@ async fn redirect_stream(
     _depot: &mut Depot,
     res: &mut Response,
 ) {
+    perform_stream_redirect(req, res).await
+}
+
+async fn perform_stream_redirect(req: &mut Request, res: &mut Response) {
     let config: Config = Config::dynamic(req).extract().unwrap();
     let redirect_url = if config.redirect_streams_host.clone().is_some() {
         format!(
@@ -315,6 +319,110 @@ async fn redirect_stream(
     res.headers_mut()
         .insert(CONTENT_TYPE, mime.as_ref().parse().unwrap());
     res.render(Redirect::temporary(redirect_url));
+}
+
+/// Stream redirection gated by the resolution policy.
+///
+/// Order matters: authenticate, apply policy, and only then redirect.
+/// - Policy disabled: legacy behaviour (plain redirect).
+/// - Unrestricted account: plain redirect.
+/// - `/library/parts` requests: the part id is checked against the part
+///   policy cache; prohibited parts get 403. Unknown parts are rejected only
+///   when `strict_stream_guard` is enabled.
+/// - Transcode session requests: identity must verify (fail closed), but no
+///   per-part validation is possible; sessions themselves are created via
+///   the enforced decision endpoint.
+#[handler]
+async fn protected_redirect_stream(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+    ctrl: &mut FlowCtrl,
+) {
+    let config: Config = Config::dynamic(req).extract().unwrap();
+    if !config.resolution_policy_enabled {
+        perform_stream_redirect(req, res).await;
+        return;
+    }
+
+    let context: PlexContext = req.extract().await.unwrap();
+    let plex_client = PlexClient::from_context(&context);
+
+    let identity = match plex_client.get_current_user().await {
+        Ok(identity) => identity,
+        Err(error) => {
+            if config.resolution_policy_fail_closed {
+                tracing::warn!(
+                    error = %error,
+                    uri = ?req.uri(),
+                    "Identity unavailable, failing closed on stream request"
+                );
+                res.status_code(StatusCode::SERVICE_UNAVAILABLE);
+                return;
+            }
+            tracing::warn!(
+                error = %error,
+                uri = ?req.uri(),
+                "Identity unavailable, failing open on stream request"
+            );
+            perform_stream_redirect(req, res).await;
+            return;
+        }
+    };
+
+    let policy = resolve_policy(
+        &config.user_resolution_policies,
+        config.resolution_default,
+        &identity,
+    );
+    if policy.is_unrestricted() {
+        perform_stream_redirect(req, res).await;
+        return;
+    }
+
+    // Direct media part request: validate against known part permissions.
+    if let Some(part_id) = req.param::<i64>("partid") {
+        match crate::plex_client::PART_POLICY_CACHE.get(&part_id).await {
+            Some(true) => {
+                tracing::debug!(
+                    username = %identity.username,
+                    part_id = part_id,
+                    "Permitted part requested"
+                );
+                perform_stream_redirect(req, res).await;
+            }
+            Some(false) => {
+                tracing::info!(
+                    username = %identity.username,
+                    part_id = part_id,
+                    maximum = ?policy.limit,
+                    "Blocked direct access to prohibited part"
+                );
+                res.status_code(StatusCode::FORBIDDEN);
+            }
+            None => {
+                if config.strict_stream_guard {
+                    tracing::info!(
+                        username = %identity.username,
+                        part_id = part_id,
+                        "Unknown part rejected by strict stream guard"
+                    );
+                    res.status_code(StatusCode::FORBIDDEN);
+                } else {
+                    tracing::debug!(
+                        username = %identity.username,
+                        part_id = part_id,
+                        "Unknown part allowed (strict stream guard disabled)"
+                    );
+                    perform_stream_redirect(req, res).await;
+                }
+            }
+        }
+        return;
+    }
+
+    // Transcode session request: authenticated, nothing else to validate.
+    perform_stream_redirect(req, res).await
 }
 
 // Google tv requests some weird thumbnail for hero elements. Let fix that
@@ -1433,6 +1541,10 @@ async fn enforce_resolution_policy(
     if media.is_empty() {
         return Ok(());
     }
+
+    // Record which parts belong to permitted versions so direct
+    // /library/parts requests can be validated later.
+    cache_part_policy(media, &policy).await;
 
     let screen_resolution = context
         .screen_resolution

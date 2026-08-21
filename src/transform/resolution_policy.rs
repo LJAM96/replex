@@ -67,6 +67,10 @@ impl Transform for ResolutionPolicyTransform {
             return;
         }
 
+        // Record part permissions before stripping so direct /library/parts
+        // requests can be validated even for items never played.
+        crate::plex_client::cache_part_policy(&item.media, &policy).await;
+
         let before = count_media(item);
         strip_media_recursive(item, &policy);
         let after = count_media(item);

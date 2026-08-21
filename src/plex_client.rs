@@ -24,13 +24,10 @@ use moka::future::Cache;
 use once_cell::sync::Lazy;
 use reqwest::header;
 use reqwest::header::ACCEPT;
-use reqwest_retry::{
-    default_on_request_failure, Retryable, RetryableStrategy,
-};
+use reqwest_retry::{default_on_request_failure, Retryable, RetryableStrategy};
 use salvo::Error;
 use salvo::Request;
 // use hyper::client::HttpConnector;
-
 
 static CACHE: Lazy<Cache<String, MediaContainerWrapper<MediaContainer>>> =
     Lazy::new(|| {
@@ -53,6 +50,31 @@ static IDENTITY_CACHE: Lazy<Cache<String, UserIdentity>> = Lazy::new(|| {
         .time_to_live(Duration::from_secs(c.identity_cache_ttl))
         .build()
 });
+
+/// Media part id -> whether that part belongs to a version permitted for the
+/// requesting account. Populated whenever an item's versions are evaluated
+/// (playback enforcement, metadata filtering). Unknown parts are handled by
+/// the strict stream guard at request time.
+pub static PART_POLICY_CACHE: Lazy<Cache<i64, bool>> = Lazy::new(|| {
+    let c: Config = Config::figment().extract().unwrap();
+    Cache::builder()
+        .max_capacity(100_000)
+        .time_to_live(Duration::from_secs(c.identity_cache_ttl))
+        .build()
+});
+
+/// Record the permitted/blocked status of every part of every media version.
+pub async fn cache_part_policy(
+    media: &[Media],
+    policy: &crate::resolution_policy::ResolutionPolicy,
+) {
+    for m in media {
+        let allowed = crate::resolution_policy::media_allowed(m, policy);
+        for part in &m.parts {
+            PART_POLICY_CACHE.insert(part.id, allowed).await;
+        }
+    }
+}
 
 /// Errors raised while resolving the authenticated Plex account.
 #[derive(Debug, thiserror::Error)]
@@ -124,7 +146,7 @@ impl PlexClient {
         let mut headers = self.default_headers.clone();
         for (key, value) in req.headers().iter() {
             if key != ACCEPT && key != http::header::HOST {
-              headers.insert(key, value.clone());
+                headers.insert(key, value.clone());
             }
         }
         //let mut headers = req.headers_mut().clone();
@@ -143,9 +165,9 @@ impl PlexClient {
     }
 
     pub async fn proxy_request(
-         &self,
-         req: &Request,
-     ) -> Result<reqwest::Response, Error> {
+        &self,
+        req: &Request,
+    ) -> Result<reqwest::Response, Error> {
         let url = format!(
             "{}{}?{}",
             self.host,
@@ -168,7 +190,7 @@ impl PlexClient {
             .map_err(Error::other)?;
         //dbg!(&res);
         Ok(res)
-     }
+    }
 
     pub async fn get_section_collections(
         &self,
@@ -215,7 +237,7 @@ impl PlexClient {
                 res.status()
             )));
         }
-        
+
         let container: MediaContainerWrapper<MediaContainer> =
             from_reqwest_response(res).await.unwrap();
         Ok(container)
@@ -304,7 +326,7 @@ impl PlexClient {
     pub async fn get_item_by_key(
         self,
         key: String,
-        ) -> Result<MediaContainerWrapper<MediaContainer>> {
+    ) -> Result<MediaContainerWrapper<MediaContainer>> {
         let res = self.get(key).await.unwrap();
         let container: MediaContainerWrapper<MediaContainer> =
             from_reqwest_response(res).await.unwrap();
@@ -317,7 +339,9 @@ impl PlexClient {
     /// only trusted basis for per-user policies. Results are cached by token
     /// hash for `identity_cache_ttl` seconds. Authentication failures evict
     /// any cached identity immediately.
-    pub async fn get_current_user(&self) -> Result<UserIdentity, IdentityError> {
+    pub async fn get_current_user(
+        &self,
+    ) -> Result<UserIdentity, IdentityError> {
         let token = self
             .context
             .token
@@ -348,7 +372,10 @@ impl PlexClient {
         Ok(identity)
     }
 
-    async fn fetch_current_user(&self, token: &str) -> Result<UserIdentity, IdentityError> {
+    async fn fetch_current_user(
+        &self,
+        token: &str,
+    ) -> Result<UserIdentity, IdentityError> {
         let config: Config = Config::figment().extract().unwrap();
         let base = config.identity_api_base();
         let url = format!("{}/api/v2/user", base);
@@ -356,15 +383,21 @@ impl PlexClient {
         let mut headers = header::HeaderMap::new();
         headers.insert(
             "X-Plex-Token",
-            header::HeaderValue::from_str(token)
-                .map_err(|e| IdentityError::Upstream(anyhow::anyhow!("bad token header: {e}")))?,
+            header::HeaderValue::from_str(token).map_err(|e| {
+                IdentityError::Upstream(anyhow::anyhow!(
+                    "bad token header: {e}"
+                ))
+            })?,
         );
         if let Some(cid) = &self.context.client_identifier {
             if let Ok(v) = header::HeaderValue::from_str(cid) {
                 headers.insert("X-Plex-Client-Identifier", v);
             }
         }
-        headers.insert(ACCEPT, header::HeaderValue::from_static("application/json"));
+        headers.insert(
+            ACCEPT,
+            header::HeaderValue::from_static("application/json"),
+        );
 
         let res = self
             .http_client
@@ -372,11 +405,16 @@ impl PlexClient {
             .headers(headers)
             .send()
             .await
-            .map_err(|e| IdentityError::Upstream(anyhow::anyhow!("plex.tv request failed: {e}")))?;
+            .map_err(|e| {
+                IdentityError::Upstream(anyhow::anyhow!(
+                    "plex.tv request failed: {e}"
+                ))
+            })?;
 
         match res.status() {
             salvo::http::StatusCode::OK => {}
-            salvo::http::StatusCode::UNAUTHORIZED | salvo::http::StatusCode::FORBIDDEN => {
+            salvo::http::StatusCode::UNAUTHORIZED
+            | salvo::http::StatusCode::FORBIDDEN => {
                 return Err(IdentityError::InvalidToken)
             }
             status => {
@@ -396,10 +434,11 @@ impl PlexClient {
             title: Option<String>,
         }
 
-        let raw: RawUser = res
-            .json()
-            .await
-            .map_err(|e| IdentityError::Upstream(anyhow::anyhow!("identity response parse failed: {e}")))?;
+        let raw: RawUser = res.json().await.map_err(|e| {
+            IdentityError::Upstream(anyhow::anyhow!(
+                "identity response parse failed: {e}"
+            ))
+        })?;
 
         let username = raw
             .username
@@ -429,10 +468,7 @@ impl PlexClient {
         Ok(r)
     }
 
-    pub async fn get_hero_art(
-        self,
-        uuid: String,
-    ) -> Option<String> {
+    pub async fn get_hero_art(self, uuid: String) -> Option<String> {
         //tracing::debug!(uuid = uuid, "Loading hero art from plex");
         let cache_key = format!("{}:hero_art", uuid);
 
@@ -457,7 +493,7 @@ impl PlexClient {
                     MediaContainerWrapper::default()
                 }
             };
-    
+
         let metadata = container.media_container.children_mut().get(0);
         let mut image: Option<String> = None;
         if metadata.is_some() {
@@ -468,11 +504,11 @@ impl PlexClient {
                 }
             }
         }
-        
+
         if image.is_none() {
-           tracing::warn!(uuid = uuid, "No hero image found on plex");
+            tracing::warn!(uuid = uuid, "No hero image found on plex");
         }
-        
+
         image.as_ref()?; // dont return and dont cache, let us just retry next time.
 
         //tracing::debug!("Hero image found");
@@ -500,7 +536,7 @@ impl PlexClient {
             url.parse::<url::Url>().unwrap(),
         );
         let mut headers = HeaderMap::new();
-        
+
         //endpoint is buggy, if llex has a cached version then it doesnt need a plex token
         // but if not cached then a server admin token is needed
         let mut token = config.token.clone();
@@ -564,9 +600,15 @@ impl PlexClient {
         let headers_map = HashMap::from([
             ("X-Plex-Token", context.token.clone()),
             ("X-Plex-Platform", Some(platform.clone().to_string())),
-            ("X-Plex-Client-Identifier", context.client_identifier.clone()),
+            (
+                "X-Plex-Client-Identifier",
+                context.client_identifier.clone(),
+            ),
             ("X-Plex-Session-Id", context.session_id.clone()),
-            ("X-Plex-Playback-Session-Id", context.playback_session_id.clone()),
+            (
+                "X-Plex-Playback-Session-Id",
+                context.playback_session_id.clone(),
+            ),
             ("X-Plex-Product", context.product.clone()),
             ("X-Plex-Playback-Id", context.playback_id.clone()),
             ("X-Plex-Platform-Version", context.platform_version.clone()),
@@ -579,23 +621,32 @@ impl PlexClient {
             ("X-Plex-Text-Format", context.text_format.clone()),
             ("X-Plex-Http-Pipeline", context.http_pipeline.clone()),
             ("X-Plex-Provider-Version", context.provider_version.clone()),
-            ("X-Plex-Device-Screen-Resolution", context.screen_resolution_original.clone()),
-            ("X-Plex-Client-Capabilities", context.client_capabilities.clone()),
+            (
+                "X-Plex-Device-Screen-Resolution",
+                context.screen_resolution_original.clone(),
+            ),
+            (
+                "X-Plex-Client-Capabilities",
+                context.client_capabilities.clone(),
+            ),
             ("X-Forwarded-For", context.forwarded_for.clone()),
             ("X-Real-Ip", context.real_ip.clone()),
             (&ACCEPT.as_str(), Some("application/json".to_string())),
             (&ACCEPT_LANGUAGE.as_str(), Some("en-US".to_string())),
             //(http::header::HOST.as_str(), Some(config.host.clone().unwrap())),
         ]);
-        
+
         for (key, val) in headers_map {
             if val.is_some() {
-              headers.insert(key.clone(), val.unwrap().as_str().parse().unwrap());
+                headers.insert(
+                    key.clone(),
+                    val.unwrap().as_str().parse().unwrap(),
+                );
             }
         }
-        
-       //let target_uri: url::Url = url::Url::parse(config.host.clone().unwrap().as_str()).unwrap();
-       //let target_host = target_uri.host().unwrap().to_string().clone();
+
+        //let target_uri: url::Url = url::Url::parse(config.host.clone().unwrap().as_str()).unwrap();
+        //let target_host = target_uri.host().unwrap().to_string().clone();
 
         //headers.insert(
         //    http::header::HOST,
