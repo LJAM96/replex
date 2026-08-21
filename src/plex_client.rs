@@ -398,11 +398,10 @@ impl PlexClient {
                 ))
             })?,
         );
-        if let Some(cid) = &self.context.client_identifier {
-            if let Ok(v) = header::HeaderValue::from_str(cid) {
-                headers.insert("X-Plex-Client-Identifier", v);
-            }
-        }
+        headers.insert(
+            "X-Plex-Client-Identifier",
+            self.client_identifier_header(),
+        );
         headers.insert(
             ACCEPT,
             header::HeaderValue::from_static("application/json"),
@@ -520,11 +519,10 @@ impl PlexClient {
             header::HeaderValue::from_str(token)
                 .map_err(|e| IdentityError::Upstream(anyhow::anyhow!("bad token header: {e}")))?,
         );
-        if let Some(cid) = &self.context.client_identifier {
-            if let Ok(v) = header::HeaderValue::from_str(cid) {
-                headers.insert("X-Plex-Client-Identifier", v);
-            }
-        }
+        headers.insert(
+            "X-Plex-Client-Identifier",
+            self.client_identifier_header(),
+        );
         headers.insert(ACCEPT, header::HeaderValue::from_static("application/json"));
 
         tracing::debug!(url = %url, "Shared-token resources lookup");
@@ -608,6 +606,19 @@ impl PlexClient {
 
         // Token is valid but has no access to THIS server: not one of ours.
         Ok(None)
+    }
+
+    /// plex.tv v2 endpoints reject requests without X-Plex-Client-Identifier.
+    /// Use the client's when present, otherwise a stable proxy identifier.
+    fn client_identifier_header(&self) -> header::HeaderValue {
+        let value = self
+            .context
+            .client_identifier
+            .clone()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "replex-resolution-proxy".to_string());
+        header::HeaderValue::from_str(&value)
+            .unwrap_or(header::HeaderValue::from_static("replex-resolution-proxy"))
     }
 
     async fn server_machine_id(&self) -> Result<String, IdentityError> {
