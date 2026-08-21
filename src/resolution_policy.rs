@@ -72,9 +72,11 @@ where
 {
     // Environment variables arrive as plain strings (figment does not parse
     // JSON in env values), while file-based config provides real sequences.
-    // Accept both.
+    // Accept both; an empty string means "no rules" rather than a startup
+    // crash.
     let value = serde_json::Value::deserialize(deserializer)?;
     let raw: Vec<RawPolicyEntry> = match value {
+        serde_json::Value::String(s) if s.trim().is_empty() => Vec::new(),
         serde_json::Value::String(s) => {
             serde_json::from_str(&s).map_err(serde::de::Error::custom)?
         }
