@@ -38,6 +38,7 @@ impl ResolutionPolicyTransform {
         Ok(resolve_policy(
             &config.user_resolution_policies,
             config.resolution_default,
+            config.hidden_collections.as_deref().unwrap_or(&[]),
             &identity,
         ))
     }
@@ -191,6 +192,62 @@ fn count_media(item: &MetaData) -> usize {
             .sum::<usize>()
 }
 
+/// Hides collections from accounts that are not explicitly permitted to see
+/// them.
+///
+/// Works together with the global `hidden_collections` default: a collection
+/// whose title is on the account's effective hidden list is removed from
+/// hub rows, section listings and collection metadata. Everything else in
+/// the library remains fully visible.
+pub struct CollectionVisibilityTransform;
+
+impl CollectionVisibilityTransform {
+    fn is_hidden(item: &MetaData, policy: &ResolutionPolicy) -> bool {
+        if policy.hidden_collections.is_empty() {
+            return false;
+        }
+        let is_collection =
+            item.is_collection_hub() || item.r#type == "collection";
+        if !is_collection {
+            return false;
+        }
+        let title = item.title.trim();
+        policy.hidden_collections.iter().any(|h| h == title)
+    }
+}
+
+#[async_trait]
+impl Transform for CollectionVisibilityTransform {
+    async fn transform_metadata(
+        &self,
+        _item: &mut MetaData,
+        _plex_client: PlexClient,
+        _options: PlexContext,
+    ) {
+    }
+
+    async fn filter_metadata(
+        &self,
+        item: MetaData,
+        plex_client: PlexClient,
+        _options: PlexContext,
+    ) -> bool {
+        match ResolutionPolicyTransform::current_policy(&plex_client).await {
+            Ok(policy) => {
+                if Self::is_hidden(&item, &policy) {
+                    tracing::debug!(
+                        title = %item.title,
+                        "Hiding collection for this account"
+                    );
+                    return false;
+                }
+                true
+            }
+            Err(_) => true, // resolution filtering already handles fail-closed
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,8 +270,10 @@ mod tests {
         serde_json::from_str::<MetaData>(&json).unwrap()
     }
 
+    // These scenarios mutate process-wide env vars, so they must run in one
+    // sequential test to avoid racing sibling tests.
     #[tokio::test]
-    async fn unrestricted_policy_is_passthrough() {
+    async fn policy_flag_and_fail_closed_scenarios() {
         // With the feature disabled the policy resolves unrestricted even
         // though identity lookup would fail; no plex client needed because
         // we short-circuit before touching it.
@@ -229,10 +288,8 @@ mod tests {
             )
             .await;
         assert_eq!(item.media.len(), 1);
-    }
 
-    #[tokio::test]
-    async fn fail_closed_strips_media_when_identity_fails() {
+        // Enabled with an unreachable identity API: fail closed strips media.
         std::env::set_var("REPLEX_RESOLUTION_POLICY_ENABLED", "true");
         std::env::set_var("REPLEX_IDENTITY_API_BASE", "http://127.0.0.1:9"); // unreachable
         let client = test_client();
@@ -275,7 +332,11 @@ mod tests {
     // pure recursion logic tested without the network
     #[test]
     fn strip_recursive_removes_only_prohibited() {
-        let policy = ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None };
+        let policy = ResolutionPolicy {
+            limit: ResolutionLimit::P1080,
+            max_bitrate: None,
+            hidden_collections: vec![],
+        };
         let json = r#"{"ratingKey": "1", "title": "Show", "type": "show", "Metadata": [
             {"ratingKey": "10", "key": "/library/metadata/10", "title": "Ep 10", "type": "episode",
              "Media": [{"id": 11, "videoResolution": "4k"}, {"id": 12, "videoResolution": "1080"}]},
@@ -293,5 +354,56 @@ mod tests {
         // 4K-only episode survives structurally; hiding is filter_metadata's job
         assert_eq!(parent.metadata[1].media.len(), 0);
         assert_eq!(count_media(&parent), 1);
+    }
+
+    // --- collection visibility ---
+
+    fn collection_item(title: &str, hub: bool) -> MetaData {
+        let kind = if hub { "hub" } else { "collection" };
+        let context = if hub {
+            // real Plex collection hubs carry this context attribute
+            r#""context": "hub.custom.collection.23.123","#.to_string()
+        } else {
+            String::new()
+        };
+        let hub_id = if hub {
+            "\"collection.test\"".to_string()
+        } else {
+            "null".to_string()
+        };
+        serde_json::from_str::<MetaData>(&format!(
+            r#"{{"ratingKey": "9", "title": "{title}", "type": "{kind}", {context} "hubIdentifier": {hub_id}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn hidden_collection_matched_by_title() {
+        let policy = ResolutionPolicy {
+            limit: ResolutionLimit::Unlimited,
+            max_bitrate: None,
+            hidden_collections: vec!["🎀Jodie".to_string()],
+        };
+
+        assert!(CollectionVisibilityTransform::is_hidden(
+            &collection_item("🎀Jodie", true),
+            &policy
+        ));
+        assert!(!CollectionVisibilityTransform::is_hidden(
+            &collection_item("Trending", true),
+            &policy
+        ));
+        // non-collection items are never hidden by this transform
+        let movie = movie(5, &[("1080", 6)]);
+        assert!(!CollectionVisibilityTransform::is_hidden(&movie, &policy));
+    }
+
+    #[test]
+    fn no_hidden_collections_means_passthrough() {
+        let policy = ResolutionPolicy::unrestricted();
+        assert!(!CollectionVisibilityTransform::is_hidden(
+            &collection_item("🎀Jodie", false),
+            &policy
+        ));
     }
 }

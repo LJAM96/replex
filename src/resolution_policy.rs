@@ -45,6 +45,9 @@ pub struct PolicyEntry {
     /// Optional maximum video bitrate in kbps. When set, playback requests
     /// requesting more are capped to this value.
     pub max_bitrate: Option<i64>,
+    /// Collection titles this account may see despite the global hidden
+    /// default. Exact match against the collection title.
+    pub visible_collections: Vec<String>,
 }
 
 /// A one-entry JSON deserializer target used while parsing config.
@@ -57,6 +60,8 @@ struct RawPolicyEntry {
     max_resolution: String,
     #[serde(default)]
     max_bitrate: Option<i64>,
+    #[serde(default)]
+    visible_collections: Vec<String>,
 }
 
 pub fn deserialize_user_resolution_policies<'de, D>(
@@ -70,8 +75,9 @@ where
     // Accept both.
     let value = serde_json::Value::deserialize(deserializer)?;
     let raw: Vec<RawPolicyEntry> = match value {
-        serde_json::Value::String(s) => serde_json::from_str(&s)
-            .map_err(serde::de::Error::custom)?,
+        serde_json::Value::String(s) => {
+            serde_json::from_str(&s).map_err(serde::de::Error::custom)?
+        }
         v => serde_json::from_value(v).map_err(serde::de::Error::custom)?,
     };
 
@@ -94,6 +100,7 @@ where
             uuid: entry.uuid,
             max_resolution,
             max_bitrate: entry.max_bitrate,
+            visible_collections: entry.visible_collections,
         });
     }
     Ok(out)
@@ -111,11 +118,14 @@ pub struct UserIdentity {
 }
 
 /// The resolved policy for a request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolutionPolicy {
     pub limit: ResolutionLimit,
     /// Maximum video bitrate in kbps, when the matched policy sets one.
     pub max_bitrate: Option<i64>,
+    /// Collection titles this account must not see (global hidden default
+    /// minus the account's explicit exceptions).
+    pub hidden_collections: Vec<String>,
 }
 
 impl ResolutionPolicy {
@@ -123,6 +133,7 @@ impl ResolutionPolicy {
         ResolutionPolicy {
             limit: ResolutionLimit::Unlimited,
             max_bitrate: None,
+            hidden_collections: Vec::new(),
         }
     }
 
@@ -137,34 +148,49 @@ impl ResolutionPolicy {
 /// Users with no matching entry receive the configured default. The identity
 /// must come from token verification; username headers on requests are never
 /// consulted here.
+///
+/// `default_hidden_collections` are hidden from everyone; accounts with a
+/// matching entry see them removed from their hidden list via
+/// `visible_collections`.
 pub fn resolve_policy(
     policies: &[PolicyEntry],
     default_limit: ResolutionLimit,
+    default_hidden_collections: &[String],
     identity: &UserIdentity,
 ) -> ResolutionPolicy {
     let matched = policies
         .iter()
         .find(|p| p.uuid.as_deref() == Some(identity.uuid.as_str()))
         .or_else(|| {
-            policies
-                .iter()
-                .find(|p| p.username.as_deref() == Some(identity.username.as_str()))
+            policies.iter().find(|p| {
+                p.username.as_deref() == Some(identity.username.as_str())
+            })
         });
 
     let limit = matched.map_or(default_limit, |p| p.max_resolution);
     let max_bitrate = matched.and_then(|p| p.max_bitrate);
+    let visible = matched
+        .map(|p| p.visible_collections.as_slice())
+        .unwrap_or(&[]);
+    let hidden_collections: Vec<String> = default_hidden_collections
+        .iter()
+        .filter(|title| !visible.contains(title))
+        .cloned()
+        .collect();
 
     tracing::debug!(
         username = %identity.username,
         uuid = %identity.uuid,
         ?limit,
         ?max_bitrate,
+        hidden_collections = ?hidden_collections,
         "Resolution policy matched"
     );
 
     ResolutionPolicy {
         limit,
         max_bitrate,
+        hidden_collections,
     }
 }
 
@@ -327,7 +353,11 @@ mod tests {
         assert_eq!(classify(&m), Some(ResolutionLimit::P1080));
         assert!(media_allowed(
             &m,
-            &ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None }
+            &ResolutionPolicy {
+                limit: ResolutionLimit::P1080,
+                max_bitrate: None,
+                hidden_collections: vec![]
+            }
         ));
     }
 
@@ -337,7 +367,11 @@ mod tests {
         assert_eq!(classify(&m), Some(ResolutionLimit::P1080));
         assert!(media_allowed(
             &m,
-            &ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None }
+            &ResolutionPolicy {
+                limit: ResolutionLimit::P1080,
+                max_bitrate: None,
+                hidden_collections: vec![]
+            }
         ));
     }
 
@@ -347,7 +381,11 @@ mod tests {
         assert_eq!(classify(&m), Some(ResolutionLimit::P2160));
         assert!(!media_allowed(
             &m,
-            &ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None }
+            &ResolutionPolicy {
+                limit: ResolutionLimit::P1080,
+                max_bitrate: None,
+                hidden_collections: vec![]
+            }
         ));
     }
 
@@ -359,7 +397,11 @@ mod tests {
         assert_eq!(classify(&m), Some(ResolutionLimit::P2160));
         assert!(!media_allowed(
             &m,
-            &ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None }
+            &ResolutionPolicy {
+                limit: ResolutionLimit::P1080,
+                max_bitrate: None,
+                hidden_collections: vec![]
+            }
         ));
     }
 
@@ -369,7 +411,11 @@ mod tests {
         assert_eq!(classify(&m), Some(ResolutionLimit::P2160));
         assert!(media_allowed(
             &m,
-            &ResolutionPolicy { limit: ResolutionLimit::P2160, max_bitrate: None }
+            &ResolutionPolicy {
+                limit: ResolutionLimit::P2160,
+                max_bitrate: None,
+                hidden_collections: vec![]
+            }
         ));
     }
 
@@ -380,7 +426,11 @@ mod tests {
         assert_eq!(classify(&m), None);
         assert!(!media_allowed(
             &m,
-            &ResolutionPolicy { limit: ResolutionLimit::P2160, max_bitrate: None }
+            &ResolutionPolicy {
+                limit: ResolutionLimit::P2160,
+                max_bitrate: None,
+                hidden_collections: vec![]
+            }
         ));
     }
 
@@ -403,7 +453,11 @@ mod tests {
         assert_eq!(classify(&m), None);
         assert!(!media_allowed(
             &m,
-            &ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None }
+            &ResolutionPolicy {
+                limit: ResolutionLimit::P1080,
+                max_bitrate: None,
+                hidden_collections: vec![]
+            }
         ));
         assert!(media_allowed(&m, &ResolutionPolicy::unrestricted()));
     }
@@ -419,7 +473,11 @@ mod tests {
 
     #[test]
     fn allowed_media_filters_for_1080_user() {
-        let policy = ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None };
+        let policy = ResolutionPolicy {
+            limit: ResolutionLimit::P1080,
+            max_bitrate: None,
+            hidden_collections: vec![],
+        };
         let allowed = allowed_media(&sample_versions(), &policy);
         assert_eq!(allowed.len(), 1);
         assert_eq!(allowed[0].video_resolution.as_deref(), Some("1080"));
@@ -427,20 +485,32 @@ mod tests {
 
     #[test]
     fn allowed_media_keeps_everything_for_4k_user() {
-        let policy = ResolutionPolicy { limit: ResolutionLimit::P2160, max_bitrate: None };
+        let policy = ResolutionPolicy {
+            limit: ResolutionLimit::P2160,
+            max_bitrate: None,
+            hidden_collections: vec![],
+        };
         assert_eq!(allowed_media(&sample_versions(), &policy).len(), 2);
     }
 
     #[test]
     fn allowed_media_empty_when_nothing_permitted() {
         let only_4k = vec![media(Some("4k"), Some(3840), Some(2160))];
-        let policy = ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None };
+        let policy = ResolutionPolicy {
+            limit: ResolutionLimit::P1080,
+            max_bitrate: None,
+            hidden_collections: vec![],
+        };
         assert!(allowed_media(&only_4k, &policy).is_empty());
     }
 
     #[test]
     fn best_allowed_prefers_closest_to_screen_density() {
-        let policy = ResolutionPolicy { limit: ResolutionLimit::P2160, max_bitrate: None };
+        let policy = ResolutionPolicy {
+            limit: ResolutionLimit::P2160,
+            max_bitrate: None,
+            hidden_collections: vec![],
+        };
         let best =
             best_allowed_media(&sample_versions(), &policy, Some((1920, 1080)))
                 .unwrap();
@@ -454,7 +524,11 @@ mod tests {
 
     #[test]
     fn best_allowed_respects_account_limit_over_device() {
-        let policy = ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None };
+        let policy = ResolutionPolicy {
+            limit: ResolutionLimit::P1080,
+            max_bitrate: None,
+            hidden_collections: vec![],
+        };
         let best = best_allowed_media(
             &sample_versions(),
             &policy,
@@ -467,7 +541,11 @@ mod tests {
     #[test]
     fn best_allowed_none_when_all_blocked() {
         let only_4k = vec![media(Some("4k"), Some(3840), Some(2160))];
-        let policy = ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None };
+        let policy = ResolutionPolicy {
+            limit: ResolutionLimit::P1080,
+            max_bitrate: None,
+            hidden_collections: vec![],
+        };
         assert!(best_allowed_media(&only_4k, &policy, None).is_none());
     }
 
@@ -493,6 +571,7 @@ mod tests {
             uuid: e.uuid,
             max_resolution: ResolutionLimit::parse(&e.max_resolution).unwrap(),
             max_bitrate: None,
+            visible_collections: vec![],
         })
         .collect();
 
@@ -521,17 +600,20 @@ mod tests {
                 uuid: None,
                 max_resolution: ResolutionLimit::P1080,
                 max_bitrate: None,
+                visible_collections: vec![],
             },
             PolicyEntry {
                 username: Some("someone-else".to_string()),
                 uuid: Some("uuid-jodie".to_string()),
                 max_resolution: ResolutionLimit::P2160,
                 max_bitrate: None,
+                visible_collections: vec![],
             },
         ];
         let policy = resolve_policy(
             &policies,
             ResolutionLimit::Unlimited,
+            &[],
             &identity(1, "uuid-jodie", "jodie"),
         );
         // uuid match wins over the username-only entry
@@ -545,10 +627,12 @@ mod tests {
             uuid: None,
             max_resolution: ResolutionLimit::P1080,
             max_bitrate: None,
+            visible_collections: vec![],
         }];
         let policy = resolve_policy(
             &policies,
             ResolutionLimit::Unlimited,
+            &[],
             &identity(1, "some-uuid", "jodie"),
         );
         assert_eq!(policy.limit, ResolutionLimit::P1080);
@@ -561,10 +645,12 @@ mod tests {
             uuid: None,
             max_resolution: ResolutionLimit::P1080,
             max_bitrate: None,
+            visible_collections: vec![],
         }];
         let policy = resolve_policy(
             &policies,
             ResolutionLimit::Unlimited,
+            &[],
             &identity(1, "other-uuid", "luke"),
         );
         assert_eq!(policy.limit, ResolutionLimit::Unlimited);
@@ -572,7 +658,12 @@ mod tests {
 
     #[test]
     fn resolve_policy_empty_policies_uses_default() {
-        let policy = resolve_policy(&[], ResolutionLimit::P1080, &identity(1, "u", "anyone"));
+        let policy = resolve_policy(
+            &[],
+            ResolutionLimit::P1080,
+            &[],
+            &identity(1, "u", "anyone"),
+        );
         assert_eq!(policy.limit, ResolutionLimit::P1080);
     }
 
@@ -584,12 +675,44 @@ mod tests {
             uuid: None,
             max_resolution: ResolutionLimit::P1080,
             max_bitrate: None,
+            visible_collections: vec![],
         }];
         let policy = resolve_policy(
             &policies,
             ResolutionLimit::Unlimited,
+            &[],
             &identity(1, "u", "jodie"),
         );
         assert_eq!(policy.limit, ResolutionLimit::Unlimited);
+    }
+
+    #[test]
+    fn resolve_policy_collection_visibility() {
+        let jodie_entry = PolicyEntry {
+            username: Some("jodiemy3".to_string()),
+            uuid: None,
+            max_resolution: ResolutionLimit::P1080,
+            max_bitrate: None,
+            visible_collections: vec!["🎀Jodie".to_string()],
+        };
+        let default_hidden = vec!["🎀Jodie".to_string()];
+
+        // Jodie: exception applies, nothing hidden.
+        let policy = resolve_policy(
+            std::slice::from_ref(&jodie_entry),
+            ResolutionLimit::Unlimited,
+            &default_hidden,
+            &identity(1, "uuid-j", "jodiemy3"),
+        );
+        assert!(policy.hidden_collections.is_empty());
+
+        // Everyone else: hidden by default.
+        let policy = resolve_policy(
+            std::slice::from_ref(&jodie_entry),
+            ResolutionLimit::Unlimited,
+            &default_hidden,
+            &identity(2, "uuid-l", "luke"),
+        );
+        assert_eq!(policy.hidden_collections, vec!["🎀Jodie".to_string()]);
     }
 }

@@ -373,6 +373,7 @@ async fn protected_redirect_stream(
     let policy = resolve_policy(
         &config.user_resolution_policies,
         config.resolution_default,
+        config.hidden_collections.as_deref().unwrap_or(&[]),
         &identity,
     );
     if policy.is_unrestricted() {
@@ -763,6 +764,7 @@ pub async fn transform_policy_response(
 
     TransformBuilder::new(plex_client, context.clone())
         .with_transform(ResolutionPolicyTransform)
+        .with_transform(CollectionVisibilityTransform)
         .apply_to(&mut container)
         .await;
 
@@ -784,6 +786,7 @@ pub async fn transform_hubs_response(
     container.content_type = content_type;
 
     TransformBuilder::new(plex_client, context.clone())
+        .with_transform(CollectionVisibilityTransform)
         .with_transform(HubRestrictionTransform)
         .with_transform(HubStyleTransform { is_home: true })
         .with_transform(HubWatchedTransform)
@@ -1334,6 +1337,7 @@ async fn video_transcode_fallback(
                         let policy = resolve_policy(
                             &config.user_resolution_policies,
                             config.resolution_default,
+                            config.hidden_collections.as_deref().unwrap_or(&[]),
                             &identity,
                         );
                         if !policy.is_unrestricted() {
@@ -1512,6 +1516,7 @@ async fn enforce_resolution_policy(
     let policy = resolve_policy(
         &config.user_resolution_policies,
         config.resolution_default,
+        config.hidden_collections.as_deref().unwrap_or(&[]),
         &identity,
     );
     if policy.is_unrestricted() && policy.max_bitrate.is_none() {
@@ -1536,7 +1541,8 @@ async fn enforce_resolution_policy(
             );
             queries.remove("videoBitrate");
             queries.remove("maxVideoBitrate");
-            queries.insert("maxVideoBitrate".to_string(), effective.to_string());
+            queries
+                .insert("maxVideoBitrate".to_string(), effective.to_string());
             replace_query(queries, req);
         }
     }

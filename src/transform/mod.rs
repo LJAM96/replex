@@ -22,7 +22,7 @@ pub use hub_section_directory::HubSectionDirectoryTransform;
 pub use hub_style::{ClientHeroStyle, HubStyleTransform};
 pub use library_interleave::LibraryInterleaveTransform;
 pub use restrictions::HubRestrictionTransform;
-pub use resolution_policy::ResolutionPolicyTransform;
+pub use resolution_policy::{CollectionVisibilityTransform, ResolutionPolicyTransform};
 
 use crate::{
     models::*,

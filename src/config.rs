@@ -114,7 +114,10 @@ pub struct Config {
         deserialize_with = "figment::util::bool_from_str_or_int"
     )]
     pub resolution_policy_enabled: bool,
-    #[serde(default, deserialize_with = "deserialize_user_resolution_policies")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_user_resolution_policies"
+    )]
     pub user_resolution_policies: Vec<PolicyEntry>,
     #[serde(default, deserialize_with = "deserialize_resolution_default")]
     pub resolution_default: ResolutionLimit,
@@ -131,6 +134,9 @@ pub struct Config {
     #[serde(default = "default_identity_cache_ttl")]
     pub identity_cache_ttl: u64,
     pub identity_api_base: Option<String>,
+    /// Collection titles hidden from accounts without an explicit exception.
+    #[serde(default, deserialize_with = "deserialize_comma_seperated_string")]
+    pub hidden_collections: Option<Vec<String>>,
 }
 
 fn default_identity_cache_ttl() -> u64 {
@@ -206,9 +212,13 @@ impl Config {
             use data_encoding::BASE32;
             let val: Vec<&str> = host.split(".replex.stream").collect();
             let owned_val = val[0].to_ascii_uppercase().to_owned();
-            let mut output = vec![0; BASE32.decode_len(owned_val.len()).unwrap()];
-            let len = BASE32.decode_mut(owned_val.as_bytes(), &mut output).unwrap();
-            config = config.join(("host", std::str::from_utf8(&output[0 .. len]).unwrap()));
+            let mut output =
+                vec![0; BASE32.decode_len(owned_val.len()).unwrap()];
+            let len = BASE32
+                .decode_mut(owned_val.as_bytes(), &mut output)
+                .unwrap();
+            config = config
+                .join(("host", std::str::from_utf8(&output[0..len]).unwrap()));
         }
         config
         // Figment::new().merge(Env::prefixed("REPLEX_"))
