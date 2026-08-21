@@ -171,8 +171,7 @@ pub fn route() -> Router {
             .path(PLEX_CONTINUE_WATCHING)
             .hoop(transform_req_include_guids)
             .hoop(transform_req_android)
-            .hoop(proxy_for_transform)
-            .get(transform_hubs_response),
+            .get(cached_hubs_response),
     );
 
     router = router
@@ -182,16 +181,14 @@ pub fn route() -> Router {
                 .hoop(transform_req_content_directory)
                 .hoop(transform_req_include_guids)
                 .hoop(transform_req_android)
-                .hoop(proxy_for_transform)
-                .get(transform_hubs_response),
+                .get(cached_hubs_response),
         )
         .push(
             Router::new()
                 .path("/hubs/home")
                 .hoop(transform_req_include_guids)
                 .hoop(transform_req_android)
-                .hoop(proxy_for_transform)
-                .get(transform_hubs_response),
+                .get(cached_hubs_response),
         )
         .push(
             Router::new()
@@ -208,8 +205,7 @@ pub fn route() -> Router {
                 .path(format!("{}/<id>", PLEX_HUBS_SECTIONS))
                 .hoop(transform_req_include_guids)
                 .hoop(transform_req_android)
-                .hoop(proxy_for_transform)
-                .get(transform_hubs_response),
+                .get(cached_hubs_response),
         )
         .push(Router::new().path("/replex/webhooks").post(webhook_plex))
         .push(Router::new().path("/ping").get(ping))
@@ -777,6 +773,99 @@ pub async fn transform_policy_response(
     TransformBuilder::new(plex_client, context.clone())
         .with_transform(ResolutionPolicyTransform)
         .with_transform(CollectionVisibilityTransform)
+        .apply_to(&mut container)
+        .await;
+
+    res.render(container);
+    Ok(())
+}
+
+/// Hub responses fetched through Replex's shared response cache.
+///
+/// Upstream hub payloads are identical for every user BEFORE per-user
+/// transforms run (restrictions, visibility, resolution filtering all apply
+/// downstream), so the raw fetch is cached by path+query with the token
+/// stripped. This lets the cache-warmer populate entries that every client
+/// then reads instantly, instead of each client waiting 45-90s for the
+/// upstream server on cold loads.
+fn cache_key_for_request(req: &Request) -> String {
+    let raw = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_default();
+    // Strip any client token so entries are shared across accounts; the
+    // request itself is still authenticated before we get here.
+    if let Ok(mut url) = Url::parse(&format!("http://x{}", raw)) {
+        let pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(k, _)| !k.eq_ignore_ascii_case("X-Plex-Token"))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        {
+            let mut ser = url.query_pairs_mut();
+            ser.clear();
+            for (k, v) in &pairs {
+                ser.append_pair(k, v);
+            }
+        }
+        return format!("{}{}", url.path(), url.query().map(|q| format!("?{q}")).unwrap_or_default());
+    }
+    raw
+}
+
+#[handler]
+pub async fn cached_hubs_response(
+    req: &mut Request,
+    res: &mut Response,
+) -> Result<(), anyhow::Error> {
+    let context: PlexContext = req.extract().await.unwrap();
+    let plex_client = PlexClient::from_context(&context);
+    let content_type = get_content_type_from_headers(req.headers_mut());
+
+    let key_path = cache_key_for_request(req);
+
+    // Shared raw-response cache: keyed WITHOUT the client token so the
+    // warmer (admin token) and every user read/write the same entries.
+    // Per-user transforms still run below on every request.
+    let cache_key = format!("hubcache:{key_path}");
+    let mut container: MediaContainerWrapper<MediaContainer> =
+        match plex_client.cache.get(&cache_key).await {
+            Some(cached) => cached,
+            None => {
+                let r = plex_client
+                    .clone()
+                    .get(key_path.clone())
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!(error = %e, path = %key_path, "upstream hub fetch failed");
+                        salvo::http::StatusError::bad_gateway()
+                    })?;
+                if r.status() != reqwest::StatusCode::OK {
+                    tracing::warn!(status = %r.status(), path = %key_path, "upstream hub fetch non-200");
+                    return Err(salvo::http::StatusError::bad_gateway().into());
+                }
+                let parsed = from_reqwest_response(r)
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!(error = ?e, path = %key_path, "hub payload parse failed");
+                        salvo::http::StatusError::bad_gateway()
+                    })?;
+                plex_client.cache.insert(cache_key.clone(), parsed.clone()).await;
+                parsed
+            }
+        };
+
+    container.content_type = content_type;
+
+    TransformBuilder::new(plex_client, context.clone())
+        .with_transform(CollectionVisibilityTransform)
+        .with_transform(HubRestrictionTransform)
+        .with_transform(HubStyleTransform { is_home: true })
+        .with_transform(HubWatchedTransform)
+        .with_transform(HubInterleaveTransform)
+        .with_transform(UserStateTransform)
+        .with_transform(HubKeyTransform)
         .apply_to(&mut container)
         .await;
 
