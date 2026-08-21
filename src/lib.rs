@@ -12,6 +12,7 @@ pub mod response;
 pub mod plex_client;
 pub mod url;
 pub mod config;
+pub mod resolution_policy;
 pub mod transform;
 pub mod logging;
 pub mod cache;

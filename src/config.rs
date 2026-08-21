@@ -1,4 +1,7 @@
 use crate::models::deserialize_comma_seperated_string;
+use crate::resolution_policy::{
+    deserialize_user_resolution_policies, PolicyEntry, ResolutionLimit,
+};
 use figment::{providers::Env, Figment};
 use serde::{Deserialize, Deserializer};
 // use serde::Deserialize;
@@ -106,6 +109,42 @@ pub struct Config {
         deserialize_with = "figment::util::bool_from_str_or_int"
     )]
     pub ntf_watchlist_force: bool,
+    #[serde(
+        default = "default_as_false",
+        deserialize_with = "figment::util::bool_from_str_or_int"
+    )]
+    pub resolution_policy_enabled: bool,
+    #[serde(default, deserialize_with = "deserialize_user_resolution_policies")]
+    pub user_resolution_policies: Vec<PolicyEntry>,
+    #[serde(default, deserialize_with = "deserialize_resolution_default")]
+    pub resolution_default: ResolutionLimit,
+    #[serde(
+        default = "default_as_true",
+        deserialize_with = "figment::util::bool_from_str_or_int"
+    )]
+    pub resolution_policy_fail_closed: bool,
+    #[serde(
+        default = "default_as_false",
+        deserialize_with = "figment::util::bool_from_str_or_int"
+    )]
+    pub strict_stream_guard: bool,
+}
+
+fn deserialize_resolution_default<'de, D>(
+    deserializer: D,
+) -> Result<ResolutionLimit, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: Option<String> = Deserialize::deserialize(deserializer)?;
+    match s {
+        None => Ok(ResolutionLimit::Unlimited),
+        Some(s) => ResolutionLimit::parse(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!(
+                "unknown resolution_default '{}', expected one of: 480, 720, 1080, 4k, unlimited",
+                s
+            ))),
+    }
 }
 
 fn default_cache_ttl() -> u64 {
