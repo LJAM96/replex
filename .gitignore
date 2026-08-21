@@ -3,3 +3,6 @@
 /target
 /vendor
 .vscode
+.env
+# oversized/volatile full-library dumps are kept locally only
+tests/mock/out/baseline/library_sections_all.json

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="2" allowSync="0" title1="Plex Library">
+<Directory allowSync="1" filters="1" refreshing="0" key="23" type="movie" title="Movies" agent="tv.plex.agents.movie" scanner="Plex Movie" language="en-US" metadataAgentProviderGroupId="1" uuid="d354af88-0971-4fae-acfe-4c8fccf6298e" updatedAt="1787157611" createdAt="1754173790" scannedAt="1787266969" content="1" directory="1" contentChangedAt="7726555702467212581" hidden="0">
+<Location id="223" path="/mnt/U/Media/Movies/Movies/NR-Adult" />
+<Location id="222" path="/mnt/U/Media/Movies/Movies" />
+<Location id="213" path="/mnt/U/Media/Movies/Anime" />
+<Location id="214" path="/mnt/U/Media/Movies/Foreign" />
+<Location id="215" path="/mnt/U/Media/Movies/Spanish" />
+<Location id="216" path="/mnt/U/Media/Movies/Movies/1980" />
+<Location id="217" path="/mnt/U/Media/Movies/Movies/1990" />
+<Location id="218" path="/mnt/U/Media/Movies/Movies/2000" />
+<Location id="219" path="/mnt/U/Media/Movies/Movies/2010" />
+<Location id="220" path="/mnt/U/Media/Movies/Movies/2020" />
+<Location id="221" path="/mnt/U/Media/Movies/Movies/Archive" />
+</Directory>
+<Directory allowSync="1" filters="1" refreshing="0" key="22" type="show" title="TV Shows" agent="tv.plex.agents.series" scanner="Plex TV Series" language="en-US" metadataAgentProviderGroupId="2" uuid="cb52ed96-254b-48bf-a800-8e0199d46ff8" updatedAt="1787258724" createdAt="1753750971" scannedAt="1787214938" content="1" directory="1" contentChangedAt="7726555702467212655" hidden="0">
+<Location id="181" path="/mnt/U/Media/TV/Anime" />
+<Location id="182" path="/mnt/U/Media/TV/Foreign" />
+<Location id="183" path="/mnt/U/Media/TV/Spanish" />
+<Location id="184" path="/mnt/U/Media/TV/TV/OTHER" />
+<Location id="185" path="/mnt/U/Media/TV/TV/A" />
+<Location id="186" path="/mnt/U/Media/TV/TV/B" />
+<Location id="187" path="/mnt/U/Media/TV/TV/C" />
+<Location id="188" path="/mnt/U/Media/TV/TV/D" />
+<Location id="189" path="/mnt/U/Media/TV/TV/E" />
+<Location id="190" path="/mnt/U/Media/TV/TV/F" />
+<Location id="191" path="/mnt/U/Media/TV/TV/G" />
+<Location id="192" path="/mnt/U/Media/TV/TV/H" />
+<Location id="193" path="/mnt/U/Media/TV/TV/I" />
+<Location id="194" path="/mnt/U/Media/TV/TV/J" />
+<Location id="195" path="/mnt/U/Media/TV/TV/K" />
+<Location id="196" path="/mnt/U/Media/TV/TV/L" />
+<Location id="197" path="/mnt/U/Media/TV/TV/M" />
+<Location id="198" path="/mnt/U/Media/TV/TV/N" />
+<Location id="199" path="/mnt/U/Media/TV/TV/O" />
+<Location id="200" path="/mnt/U/Media/TV/TV/P" />
+<Location id="201" path="/mnt/U/Media/TV/TV/Q" />
+<Location id="202" path="/mnt/U/Media/TV/TV/R" />
+<Location id="203" path="/mnt/U/Media/TV/TV/S" />
+<Location id="204" path="/mnt/U/Media/TV/TV/T" />
+<Location id="205" path="/mnt/U/Media/TV/TV/U" />
+<Location id="206" path="/mnt/U/Media/TV/TV/V" />
+<Location id="207" path="/mnt/U/Media/TV/TV/W" />
+<Location id="208" path="/mnt/U/Media/TV/TV/X" />
+<Location id="209" path="/mnt/U/Media/TV/TV/Y" />
+<Location id="210" path="/mnt/U/Media/TV/TV/Z" />
+</Directory>
+</MediaContainer>

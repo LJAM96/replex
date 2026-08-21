@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="1" allowSync="1" identifier="com.plexapp.plugins.library" librarySectionID="23" librarySectionTitle="Movies" librarySectionUUID="d354af88-0971-4fae-acfe-4c8fccf6298e" mediaTagPrefix="/system/bundle/media/flags/" mediaTagVersion="1786540085">
+<Video ratingKey="3327053" key="/library/metadata/3327053" guid="plex://movie/5d77687a6f4521001eaa8d53" slug="bells-are-ringing" editionTitle="4K &#183; 3.7 GB &#183; Blu-ray &#183; H.264 &#183; 19.5 Mbps &#183; SDR &#183; AAC" studio="Metro-Goldwyn-Mayer" type="movie" title="Bells Are Ringing" librarySectionTitle="Movies" librarySectionID="23" librarySectionKey="/library/sections/23" contentRating="gb/U" summary="Ella Peterson is a Brooklyn telephone answering service operator who tries to improve the lives of her clients by passing along bits of information she hears from other clients. She falls in love with one of her clients, the playwright Jeffrey Moss, and is determined to meet him. The trouble is, on the phone to him, she always pretends to be an old woman whom he calls &#34;Mom.&#34;" audienceRating="6.3" year="1960" tagline="The screen is singing M.G.M. is bringing Broadway&#39;s Bell-Ringer of a Musical to the World!" thumb="/library/metadata/3327053/thumb/1771785921" art="/library/metadata/3327053/art/1771785921" duration="1619853" originallyAvailableAt="1960-06-23" addedAt="1758861102" updatedAt="1771785921" audienceRatingImage="themoviedb://image.rating" primaryExtraKey="/library/metadata/3329279">
+<Media id="4123837" duration="1619853" bitrate="19535" width="4096" height="2160" aspectRatio="1.85" audioChannels="2" audioCodec="aac" videoCodec="h264" videoResolution="4k" container="mp4" videoFrameRate="NTSC" optimizedForStreaming="0" audioProfile="lc" has64bitOffsets="0" videoProfile="high" hasVoiceActivity="0">
+<Part id="4128932" key="/library/parts/4128932/0/file.mp4" duration="1619853" file="/mnt/U/Media/Movies/Movies/NR-Adult/Bells Are Ringing (1960) [imdb-tt0053645][tmdb-43029]/Bells Are Ringing (1960) [imdb-tt0053645][tmdb-43029][Bluray-2160p][AAC 2.0][x264].mp4" size="3955558534" audioProfile="lc" container="mp4" has64bitOffsets="0" optimizedForStreaming="0" videoProfile="high">
+<Stream id="14974442" streamType="1" default="1" codec="h264" index="0" bitrate="19271" language="English" languageTag="en" languageCode="eng" bitDepth="8" chromaLocation="left" chromaSubsampling="4:2:0" codedHeight="2160" codedWidth="4096" frameRate="29.970" hasScalingMatrix="0" height="2160" level="52" profile="high" refFrames="4" scanType="progressive" streamIdentifier="1" width="4096" displayTitle="4K" extendedDisplayTitle="4K (H.264)">
+</Stream>
+<Stream id="14974443" streamType="2" selected="1" default="1" codec="aac" index="1" channels="2" bitrate="256" language="English" languageTag="en" languageCode="eng" audioChannelLayout="stereo" profile="lc" samplingRate="44100" streamIdentifier="2" displayTitle="English (AAC Stereo)" extendedDisplayTitle="English (AAC Stereo)">
+</Stream>
+</Part>
+</Media>
+<Image alt="Bells Are Ringing" type="coverPoster" url="/library/metadata/3327053/thumb/1771785921" />
+<Image alt="Bells Are Ringing" type="background" url="/library/metadata/3327053/art/1771785921" />
+<Image alt="Bells Are Ringing" type="clearLogo" url="/library/metadata/3327053/clearLogo/1771785921" />
+<Image alt="Bells Are Ringing" type="backgroundSquare" url="/library/metadata/3327053/squareArt/1771785921" />
+<UltraBlurColors topLeft="590a0d" topRight="ab1c24" bottomRight="904434" bottomLeft="712d2a" />
+<Genre id="135" filter="genre=135" tag="Musical" />
+<Genre id="41" filter="genre=41" tag="Comedy" />
+<Genre id="289" filter="genre=289" tag="Romance" />
+<Country id="79" filter="country=79" tag="United States of America" />
+<Guid id="imdb://tt0053645" />
+<Guid id="tmdb://43029" />
+<Guid id="tvdb://46526" />
+<Rating image="imdb://image.rating" value="6.9" type="audience" />
+<Rating image="rottentomatoes://image.rating.ripe" value="8.2" type="critic" />
+<Rating image="rottentomatoes://image.rating.upright" value="7.5" type="audience" />
+<Rating image="themoviedb://image.rating" value="6.3" type="audience" />
+<Director id="4133735" filter="director=4133735" tag="Vincente Minnelli" tagKey="5d7768285af944001f1f71bb" thumb="https://metadata-static.plex.tv/0/people/0e636527a296e90cc99528b74229e4ca.jpg" />
+<Writer id="3922267" filter="writer=3922267" tag="Betty Comden" tagKey="5d77682985719b001f3a1362" thumb="https://metadata-static.plex.tv/f/people/f7cb793e311594698801a14d30c24193.jpg" />
+<Writer id="3922266" filter="writer=3922266" tag="Adolph Green" tagKey="5d77682985719b001f3a1361" thumb="https://metadata-static.plex.tv/6/people/621e1139c807bde2a4bdb3a80014348a.jpg" />
+<Role id="4460676" filter="actor=4460676" tag="Judy Holliday" tagKey="5d7768452ec6b5001f6bea91" role="Ella Peterson" thumb="https://metadata-static.plex.tv/d/people/d5d3df06b658cf416dc3d7afd1e4d2fd.jpg" />
+<Role id="3947136" filter="actor=3947136" tag="Dean Martin" tagKey="5d776826151a60001f24a780" role="Jeffrey Moss" thumb="https://metadata-static.plex.tv/c/people/c6564f2453b0fa6688eda033c4cc6ab8.jpg" />
+<Role id="541170" filter="actor=541170" tag="Fred Clark" tagKey="5d776828a091de001f2e6462" role="Larry Hastings" thumb="https://metadata-static.plex.tv/0/people/0ec40608c963b7f9c5650b8ffe379658.jpg" />
+<Role id="537613" filter="actor=537613" tag="Eddie Foy Jr." tagKey="5d776864eb5d26001f1e93f8" role="J. Otto Prantz" thumb="https://metadata-static.plex.tv/b/people/bc6830f1436e6513263113cdd64d8a14.jpg" />
+<Role id="6555" filter="actor=6555" tag="Jean Stapleton" tagKey="5d776826880197001ec9068e" role="Sue" thumb="https://metadata-static.plex.tv/c/people/c2cf1613c71ec7a596c63bb47b382b78.jpg" />
+<Role id="54397" filter="actor=54397" tag="Ruth Storey" tagKey="5d7768436f4521001ea9eb9a" role="Gwynne" />
+<Role id="576492" filter="actor=576492" tag="Dort Clark" tagKey="5d776839a091de001f2e885a" role="Inspector Barnes" thumb="https://metadata-static.plex.tv/people/5d776839a091de001f2e885a.jpg" />
+<Role id="2186" filter="actor=2186" tag="Frank Gorshin" tagKey="5d77682c85719b001f3a1d20" role="Blake Barton" thumb="https://metadata-static.plex.tv/1/people/1bdfef85a35f63f0fe627ccb435a0f50.jpg" />
+<Role id="53802" filter="actor=53802" tag="Ralph Roberts" tagKey="5d776834961905001eb93c34" role="Francis" />
+<Role id="3713293" filter="actor=3713293" tag="Valerie Allen" tagKey="5d77682f6f4521001ea9ad70" role="Olga" thumb="https://metadata-static.plex.tv/3/people/3233bdbf270911798a01511f6eec078f.jpg" />
+<Role id="4576434" filter="actor=4576434" tag="Bernie West" tagKey="5d77687a6f4521001eaa8db4" role="Joe Kitchell" />
+<Role id="3843698" filter="actor=3843698" tag="Steve Peck" tagKey="5d77683f103a2d001f56a453" role="Gangster (uncredited)" />
+<Role id="4039414" filter="actor=4039414" tag="Gerry Mulligan" tagKey="5d77685833f255001e8535a9" role="Ella&#39;s Blind Date" thumb="https://image.tmdb.org/t/p/original/6279wr2h1oRHT8Lvg7JicgNlvFg.jpg" />
+<Role id="541258" filter="actor=541258" tag="Jimmy Ames" tagKey="5d7768316f4521001ea9b502" role="Bernie" />
+<Role id="568067" filter="actor=568067" tag="Lela Bliss" tagKey="5d7768388a7581001f12dd95" role="Party Guest (uncredited)" thumb="https://metadata-static.plex.tv/people/5d7768388a7581001f12dd95.jpg" />
+<Role id="3999843" filter="actor=3999843" tag="Donna Douglas" tagKey="5d7768428718ba001e317466" role="Party Guest (uncredited)" thumb="https://metadata-static.plex.tv/6/people/6491f25aafdc9631d7c3deaab3325b3b.jpg" />
+<Role id="4164549" filter="actor=4164549" tag="Oliver Blake" tagKey="5d776825103a2d001f563b53" role="Ludwig Smiley (uncredited)" thumb="https://metadata-static.plex.tv/5/people/5e310769779a63c5592c35427a7901c2.jpg" />
+<Role id="27727" filter="actor=27727" tag="Herb Vigran" tagKey="5d776836f54112001f5bd9d6" role="Barney Lampwick (uncredited)" thumb="https://metadata-static.plex.tv/a/people/adb6d0a1e63c10a3a81690a4b887fb03.jpg" />
+<Role id="21651" filter="actor=21651" tag="Len Lesser" tagKey="5d7768284de0ee001fcc9087" role="Charlie Bessemer (uncredited)" thumb="https://metadata-static.plex.tv/7/people/7b255277e807bd54df6b6ca777a104b5.jpg" />
+<Role id="4576435" filter="actor=4576435" tag="Barbara Hines" tagKey="5d7768627a53e9001e6ce58f" role="Party Guest (uncredited)" thumb="https://metadata-static.plex.tv/people/5d7768627a53e9001e6ce58f.jpg" />
+<Role id="4194933" filter="actor=4194933" tag="Marina Koshetz" tagKey="5d776859880197001ec99e00" role="Mme Grimaldi (uncredited)" thumb="https://metadata-static.plex.tv/9/people/90fe88f92583c4d44a5d96c7ac750901.jpg" />
+<Role id="2377" filter="actor=2377" tag="Hal Linden" tagKey="5d77683ea091de001f2e9220" role="Singer (uncredited)" thumb="https://metadata-static.plex.tv/6/people/605ed05b6e511dd135abeb4a94287da0.jpg" />
+<Role id="4576248" filter="actor=4576248" tag="Titus Moede" tagKey="5d77682f961905001eb92da8" role="Beatnik (uncredited)" thumb="https://metadata-static.plex.tv/people/5d77682f961905001eb92da8.jpg" />
+<Role id="5634394" filter="actor=5634394" tag="Nina Roman" tagKey="5ec40d76c3a83800425cf0b0" role="Actress (uncredited)" />
+<Role id="71468" filter="actor=71468" tag="Maida Severn" tagKey="5d776859880197001ec99c04" role="(uncredited)" thumb="https://metadata-static.plex.tv/f/people/fc7b8b493d2bb64345cbaccb1181d126.jpg" />
+<Role id="2784175" filter="actor=2784175" tag="Olan Soule" tagKey="5d7768526f4521001eaa17f4" role="Nervous Man (uncredited)" thumb="https://metadata-static.plex.tv/8/people/81e45a432ca59c4d953f877b06e6a1b1.jpg" />
+<Role id="4576436" filter="actor=4576436" tag="Doris Wiss" tagKey="5e7e3e23b6cc6f003f0324d8" role="Actress (uncredited)" />
+<Role id="9504" filter="actor=9504" tag="Elizabeth Montgomery" tagKey="5d77682f54f42c001f8c37eb" role="Girl Reading Book (uncredited)" thumb="https://metadata-static.plex.tv/9/people/925f87cb53b5704b96b8b6ae1681d9c7.jpg" />
+<Role id="4522028" filter="actor=4522028" tag="Jean Moorhead" tagKey="5d77686b33f255001e8558c8" role="Party Guest (uncredited)" thumb="https://metadata-static.plex.tv/7/people/7660fa043157603c8ef84e3193f7d40b.jpg" />
+<Producer id="4177732" filter="producer=4177732" tag="Arthur Freed" tagKey="5d7768273c3c2a001fbcb2e3" />
+<Field locked="1" name="editionTitle" />
+</Video>
+</MediaContainer>

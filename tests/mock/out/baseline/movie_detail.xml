@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MediaContainer size="1" allowSync="1" identifier="com.plexapp.plugins.library" librarySectionID="23" librarySectionTitle="Movies" librarySectionUUID="d354af88-0971-4fae-acfe-4c8fccf6298e" mediaTagPrefix="/system/bundle/media/flags/" mediaTagVersion="1786540085">
+<Video ratingKey="2943985" key="/library/metadata/2943985" guid="plex://movie/62fab559dae86ae80bda84fd" slug="the-almost-legends" editionTitle="1080p &#183; 5.2 GB &#183; WEB-DL &#183; H.264 &#183; 7.7 Mbps &#183; SDR &#183; Atmos" studio="Alebrije Producciones" type="movie" title="The (Almost) Legends" titleSort="(Almost) Legends" librarySectionTitle="Movies" librarySectionID="23" librarySectionKey="/library/sections/23" originalTitle="Los (casi) &#237;dolos de Bah&#237;a Colorada" contentRating="gb/15" contentRatingAge="14" summary="Romeo and Preciado are the sons of Valent&#237;n, a lover of love, a fan of music and cars, who has a heart of condominium and two wives. After the sudden death of his father, they both decide to separate to pursue their destiny. But Romeo pauses his dream of becoming a telenovela villain to return to Bah&#237;a Colorada and thus run in a mythical car rally to &#34;honor the memory of his father&#34;, coming face to face with a past that is denied. to overcome." audienceRating="7.8" year="2023" thumb="/library/metadata/2943985/thumb/1771778463" art="/library/metadata/2943985/art/1771778463" duration="5806496" originallyAvailableAt="2023-07-19" addedAt="1756486478" updatedAt="1771778463" audienceRatingImage="themoviedb://image.rating" chapterSource="media">
+<Media id="3580136" duration="5806496" bitrate="7692" width="1920" height="1080" aspectRatio="1.78" audioChannels="6" audioCodec="eac3" videoCodec="h264" videoResolution="1080" container="mkv" videoFrameRate="24p" videoProfile="high" hasVoiceActivity="0">
+<Part id="3585231" key="/library/parts/3585231/1756266747/file.mkv" duration="5806496" file="/mnt/U/Media/Movies/Movies/2020/The Almost Legends (2023) [imdb-tt21737024][tmdb-1148969]/The Almost Legends (2023) [imdb-tt21737024][tmdb-1148969][WEBDL-1080p][EAC3 5.1][x264].mkv" size="5582881134" container="mkv" videoProfile="high">
+<Stream id="12973805" streamType="1" default="1" codec="h264" index="0" bitrate="6412" language="English" languageTag="en" languageCode="eng" bitDepth="8" chromaLocation="left" chromaSubsampling="4:2:0" codedHeight="1088" codedWidth="1920" frameRate="24.000" hasScalingMatrix="0" height="1080" level="40" original="1" profile="high" refFrames="4" scanType="progressive" width="1920" displayTitle="1080p" extendedDisplayTitle="1080p (H.264)">
+</Stream>
+<Stream id="12973806" streamType="2" default="1" codec="eac3" index="1" channels="6" bitrate="640" language="Espa&#241;ol" languageTag="es" languageCode="spa" audioChannelLayout="5.1(side)" original="1" samplingRate="48000" title="Spanish" displayTitle="Espa&#241;ol (EAC3 5.1)" extendedDisplayTitle="Spanish (Espa&#241;ol EAC3 5.1)">
+</Stream>
+<Stream id="12973807" streamType="2" selected="1" codec="eac3" index="2" channels="6" bitrate="640" language="English" languageTag="en-US" languageCode="eng" audioChannelLayout="5.1(side)" dub="1" samplingRate="48000" title="English" displayTitle="English (EAC3 5.1)" extendedDisplayTitle="English (EAC3 5.1)">
+</Stream>
+<Stream id="12973808" streamType="3" canAutoSync="0" codec="srt" index="3" bitrate="0" language="Espa&#241;ol" languageTag="es" languageCode="spa" hearingImpaired="1" original="1" title="Spanish (SDH)" displayTitle="Espa&#241;ol SDH" extendedDisplayTitle="Spanish (SDH) (Espa&#241;ol SRT)">
+</Stream>
+<Stream id="12973809" streamType="3" canAutoSync="0" codec="srt" index="4" bitrate="0" language="&#1575;&#1604;&#1593;&#1585;&#1576;&#1610;&#1577;" languageTag="ar" languageCode="ara" dub="1" title="Arabic (Modern Standard)" displayTitle="&#1575;&#1604;&#1593;&#1585;&#1576;&#1610;&#1577;" extendedDisplayTitle="Arabic (Modern Standard) (&#1575;&#1604;&#1593;&#1585;&#1576;&#1610;&#1577; SRT)">
+</Stream>
+<Stream id="12973810" streamType="3" canAutoSync="0" codec="srt" index="5" bitrate="0" language="&#268;e&#353;tina" languageTag="cs" languageCode="ces" dub="1" title="Czech" displayTitle="&#268;e&#353;tina" extendedDisplayTitle="Czech (&#268;e&#353;tina SRT)">
+</Stream>
+<Stream id="12973811" streamType="3" canAutoSync="0" codec="srt" index="6" bitrate="0" language="Deutsch" languageTag="de" languageCode="deu" dub="1" title="German" displayTitle="Deutsch" extendedDisplayTitle="German (Deutsch SRT)">
+</Stream>
+<Stream id="12973812" streamType="3" canAutoSync="0" codec="srt" index="7" bitrate="0" language="&#917;&#955;&#955;&#951;&#957;&#953;&#954;&#940;" languageTag="el" languageCode="ell" dub="1" title="Greek" displayTitle="&#917;&#955;&#955;&#951;&#957;&#953;&#954;&#940;" extendedDisplayTitle="Greek (&#917;&#955;&#955;&#951;&#957;&#953;&#954;&#940; SRT)">
+</Stream>
+<Stream id="12973813" streamType="3" canAutoSync="0" selected="1" forced="1" codec="srt" index="8" bitrate="0" language="English" languageTag="en-US" languageCode="eng" dub="1" title="English (Forced)" displayTitle="English Forced" extendedDisplayTitle="English (Forced) (SRT)">
+</Stream>
+<Stream id="12973814" streamType="3" canAutoSync="0" codec="srt" index="9" bitrate="0" language="English" languageTag="en-US" languageCode="eng" dub="1" title="English (CC)" displayTitle="English" extendedDisplayTitle="English (CC) (SRT)">
+</Stream>
+<Stream id="12973815" streamType="3" canAutoSync="0" codec="srt" index="10" bitrate="0" language="English" languageTag="en-US" languageCode="eng" dub="1" hearingImpaired="1" title="English (SDH)" displayTitle="English SDH" extendedDisplayTitle="English (SDH) (SRT)">
+</Stream>
+<Stream id="12973816" streamType="3" canAutoSync="0" codec="srt" index="11" bitrate="0" language="English" languageTag="en-US" languageCode="eng" dub="1" title="English" displayTitle="English" extendedDisplayTitle="English (SRT)">
+</Stream>
+<Stream id="12973817" streamType="3" canAutoSync="0" codec="srt" index="12" bitrate="0" language="Fran&#231;ais" languageTag="fr" languageCode="fra" dub="1" title="French" displayTitle="Fran&#231;ais" extendedDisplayTitle="French (Fran&#231;ais SRT)">
+</Stream>
+<Stream id="12973818" streamType="3" canAutoSync="0" codec="srt" index="13" bitrate="0" language="&#1506;&#1489;&#1512;&#1497;&#1514;" languageTag="he" languageCode="heb" dub="1" title="Hebrew" displayTitle="&#1506;&#1489;&#1512;&#1497;&#1514;" extendedDisplayTitle="Hebrew (&#1506;&#1489;&#1512;&#1497;&#1514; SRT)">
+</Stream>
+<Stream id="12973819" streamType="3" canAutoSync="0" codec="srt" index="14" bitrate="0" language="Hrvatski" languageTag="hr" languageCode="hrv" dub="1" title="Croatian" displayTitle="Hrvatski" extendedDisplayTitle="Croatian (Hrvatski SRT)">
+</Stream>
+<Stream id="12973820" streamType="3" canAutoSync="0" codec="srt" index="15" bitrate="0" language="magyar" languageTag="hu" languageCode="hun" dub="1" title="Hungarian" displayTitle="magyar" extendedDisplayTitle="Hungarian (magyar SRT)">
+</Stream>
+<Stream id="12973821" streamType="3" canAutoSync="0" codec="srt" index="16" bitrate="0" language="Italiano" languageTag="it" languageCode="ita" dub="1" title="Italian" displayTitle="Italiano" extendedDisplayTitle="Italian (Italiano SRT)">
+</Stream>
+<Stream id="12973822" streamType="3" canAutoSync="0" codec="srt" index="17" bitrate="0" language="Nederlands" languageTag="nl" languageCode="nld" dub="1" title="Dutch" displayTitle="Nederlands" extendedDisplayTitle="Dutch (Nederlands SRT)">
+</Stream>
+<Stream id="12973823" streamType="3" canAutoSync="0" codec="srt" index="18" bitrate="0" language="polski" languageTag="pl" languageCode="pol" dub="1" title="Polish" displayTitle="polski" extendedDisplayTitle="Polish (polski SRT)">
+</Stream>
+<Stream id="12973824" streamType="3" canAutoSync="0" codec="srt" index="19" bitrate="0" language="Portugu&#234;s" languageTag="pt" languageCode="por" dub="1" title="Portuguese" displayTitle="Portugu&#234;s" extendedDisplayTitle="Portuguese (Portugu&#234;s SRT)">
+</Stream>
+<Stream id="12973825" streamType="3" canAutoSync="0" codec="srt" index="20" bitrate="0" language="Portugu&#234;s" languageTag="pt-BR" languageCode="por" dub="1" title="Portuguese (Brazil)" displayTitle="Portugu&#234;s" extendedDisplayTitle="Portuguese (Brazil) (Portugu&#234;s SRT)">
+</Stream>
+<Stream id="12973826" streamType="3" canAutoSync="0" codec="srt" index="21" bitrate="0" language="rom&#226;n&#259;" languageTag="ro" languageCode="ron" dub="1" title="Romanian" displayTitle="rom&#226;n&#259;" extendedDisplayTitle="Romanian (rom&#226;n&#259; SRT)">
+</Stream>
+<Stream id="12973827" streamType="3" canAutoSync="0" codec="srt" index="22" bitrate="0" language="T&#252;rk&#231;e" languageTag="tr" languageCode="tur" dub="1" title="Turkish" displayTitle="T&#252;rk&#231;e" extendedDisplayTitle="Turkish (T&#252;rk&#231;e SRT)">
+</Stream>
+<Stream id="12973828" streamType="3" canAutoSync="0" codec="srt" index="23" bitrate="0" language="&#1059;&#1082;&#1088;&#1072;&#1111;&#1085;&#1089;&#1100;&#1082;&#1072;" languageTag="uk" languageCode="ukr" dub="1" title="Ukrainian" displayTitle="&#1059;&#1082;&#1088;&#1072;&#1111;&#1085;&#1089;&#1100;&#1082;&#1072;" extendedDisplayTitle="Ukrainian (&#1059;&#1082;&#1088;&#1072;&#1111;&#1085;&#1089;&#1100;&#1082;&#1072; SRT)">
+</Stream>
+</Part>
+</Media>
+<Media id="3614530" duration="5806496" bitrate="7692" width="1920" height="1080" aspectRatio="1.78" audioChannels="6" audioCodec="eac3" videoCodec="h264" videoResolution="1080" container="mkv" videoFrameRate="24p" videoProfile="high" hasVoiceActivity="0">
+<Part id="3619625" key="/library/parts/3619625/1689724800/file.mkv" duration="5806496" file="/mnt/U/Media/Movies/Spanish/The Almost Legends (2023) [imdb-tt21737024][tmdb-1148969]/The Almost Legends (2023) [imdb-tt21737024][tmdb-1148969][WEBDL-1080p][EAC3 5.1][x264].mkv" size="5582881134" container="mkv" videoProfile="high">
+<Stream id="13104816" streamType="1" default="1" codec="h264" index="0" bitrate="6412" language="English" languageTag="en" languageCode="eng" bitDepth="8" chromaLocation="left" chromaSubsampling="4:2:0" codedHeight="1088" codedWidth="1920" frameRate="24.000" hasScalingMatrix="0" height="1080" level="40" original="1" profile="high" refFrames="4" scanType="progressive" width="1920" displayTitle="1080p" extendedDisplayTitle="1080p (H.264)">
+</Stream>
+<Stream id="13104817" streamType="2" default="1" codec="eac3" index="1" channels="6" bitrate="640" language="Espa&#241;ol" languageTag="es" languageCode="spa" audioChannelLayout="5.1(side)" original="1" samplingRate="48000" title="Spanish" displayTitle="Espa&#241;ol (EAC3 5.1)" extendedDisplayTitle="Spanish (Espa&#241;ol EAC3 5.1)">
+</Stream>
+<Stream id="13104818" streamType="2" selected="1" codec="eac3" index="2" channels="6" bitrate="640" language="English" languageTag="en-US" languageCode="eng" audioChannelLayout="5.1(side)" dub="1" samplingRate="48000" title="English" displayTitle="English (EAC3 5.1)" extendedDisplayTitle="English (EAC3 5.1)">
+</Stream>
+<Stream id="13104819" streamType="3" canAutoSync="0" codec="srt" index="3" bitrate="0" language="Espa&#241;ol" languageTag="es" languageCode="spa" hearingImpaired="1" original="1" title="Spanish (SDH)" displayTitle="Espa&#241;ol SDH" extendedDisplayTitle="Spanish (SDH) (Espa&#241;ol SRT)">
+</Stream>
+<Stream id="13104820" streamType="3" canAutoSync="0" codec="srt" index="4" bitrate="0" language="&#1575;&#1604;&#1593;&#1585;&#1576;&#1610;&#1577;" languageTag="ar" languageCode="ara" dub="1" title="Arabic (Modern Standard)" displayTitle="&#1575;&#1604;&#1593;&#1585;&#1576;&#1610;&#1577;" extendedDisplayTitle="Arabic (Modern Standard) (&#1575;&#1604;&#1593;&#1585;&#1576;&#1610;&#1577; SRT)">
+</Stream>
+<Stream id="13104821" streamType="3" canAutoSync="0" codec="srt" index="5" bitrate="0" language="&#268;e&#353;tina" languageTag="cs" languageCode="ces" dub="1" title="Czech" displayTitle="&#268;e&#353;tina" extendedDisplayTitle="Czech (&#268;e&#353;tina SRT)">
+</Stream>
+<Stream id="13104822" streamType="3" canAutoSync="0" codec="srt" index="6" bitrate="0" language="Deutsch" languageTag="de" languageCode="deu" dub="1" title="German" displayTitle="Deutsch" extendedDisplayTitle="German (Deutsch SRT)">
+</Stream>
+<Stream id="13104823" streamType="3" canAutoSync="0" codec="srt" index="7" bitrate="0" language="&#917;&#955;&#955;&#951;&#957;&#953;&#954;&#940;" languageTag="el" languageCode="ell" dub="1" title="Greek" displayTitle="&#917;&#955;&#955;&#951;&#957;&#953;&#954;&#940;" extendedDisplayTitle="Greek (&#917;&#955;&#955;&#951;&#957;&#953;&#954;&#940; SRT)">
+</Stream>
+<Stream id="13104824" streamType="3" canAutoSync="0" selected="1" forced="1" codec="srt" index="8" bitrate="0" language="English" languageTag="en-US" languageCode="eng" dub="1" title="English (Forced)" displayTitle="English Forced" extendedDisplayTitle="English (Forced) (SRT)">
+</Stream>
+<Stream id="13104825" streamType="3" canAutoSync="0" codec="srt" index="9" bitrate="0" language="English" languageTag="en-US" languageCode="eng" dub="1" title="English (CC)" displayTitle="English" extendedDisplayTitle="English (CC) (SRT)">
+</Stream>
+<Stream id="13104826" streamType="3" canAutoSync="0" codec="srt" index="10" bitrate="0" language="English" languageTag="en-US" languageCode="eng" dub="1" hearingImpaired="1" title="English (SDH)" displayTitle="English SDH" extendedDisplayTitle="English (SDH) (SRT)">
+</Stream>
+<Stream id="13104827" streamType="3" canAutoSync="0" codec="srt" index="11" bitrate="0" language="English" languageTag="en-US" languageCode="eng" dub="1" title="English" displayTitle="English" extendedDisplayTitle="English (SRT)">
+</Stream>
+<Stream id="13104828" streamType="3" canAutoSync="0" codec="srt" index="12" bitrate="0" language="Fran&#231;ais" languageTag="fr" languageCode="fra" dub="1" title="French" displayTitle="Fran&#231;ais" extendedDisplayTitle="French (Fran&#231;ais SRT)">
+</Stream>
+<Stream id="13104829" streamType="3" canAutoSync="0" codec="srt" index="13" bitrate="0" language="&#1506;&#1489;&#1512;&#1497;&#1514;" languageTag="he" languageCode="heb" dub="1" title="Hebrew" displayTitle="&#1506;&#1489;&#1512;&#1497;&#1514;" extendedDisplayTitle="Hebrew (&#1506;&#1489;&#1512;&#1497;&#1514; SRT)">
+</Stream>
+<Stream id="13104830" streamType="3" canAutoSync="0" codec="srt" index="14" bitrate="0" language="Hrvatski" languageTag="hr" languageCode="hrv" dub="1" title="Croatian" displayTitle="Hrvatski" extendedDisplayTitle="Croatian (Hrvatski SRT)">
+</Stream>
+<Stream id="13104831" streamType="3" canAutoSync="0" codec="srt" index="15" bitrate="0" language="magyar" languageTag="hu" languageCode="hun" dub="1" title="Hungarian" displayTitle="magyar" extendedDisplayTitle="Hungarian (magyar SRT)">
+</Stream>
+<Stream id="13104832" streamType="3" canAutoSync="0" codec="srt" index="16" bitrate="0" language="Italiano" languageTag="it" languageCode="ita" dub="1" title="Italian" displayTitle="Italiano" extendedDisplayTitle="Italian (Italiano SRT)">
+</Stream>
+<Stream id="13104833" streamType="3" canAutoSync="0" codec="srt" index="17" bitrate="0" language="Nederlands" languageTag="nl" languageCode="nld" dub="1" title="Dutch" displayTitle="Nederlands" extendedDisplayTitle="Dutch (Nederlands SRT)">
+</Stream>
+<Stream id="13104834" streamType="3" canAutoSync="0" codec="srt" index="18" bitrate="0" language="polski" languageTag="pl" languageCode="pol" dub="1" title="Polish" displayTitle="polski" extendedDisplayTitle="Polish (polski SRT)">
+</Stream>
+<Stream id="13104835" streamType="3" canAutoSync="0" codec="srt" index="19" bitrate="0" language="Portugu&#234;s" languageTag="pt" languageCode="por" dub="1" title="Portuguese" displayTitle="Portugu&#234;s" extendedDisplayTitle="Portuguese (Portugu&#234;s SRT)">
+</Stream>
+<Stream id="13104836" streamType="3" canAutoSync="0" codec="srt" index="20" bitrate="0" language="Portugu&#234;s" languageTag="pt-BR" languageCode="por" dub="1" title="Portuguese (Brazil)" displayTitle="Portugu&#234;s" extendedDisplayTitle="Portuguese (Brazil) (Portugu&#234;s SRT)">
+</Stream>
+<Stream id="13104837" streamType="3" canAutoSync="0" codec="srt" index="21" bitrate="0" language="rom&#226;n&#259;" languageTag="ro" languageCode="ron" dub="1" title="Romanian" displayTitle="rom&#226;n&#259;" extendedDisplayTitle="Romanian (rom&#226;n&#259; SRT)">
+</Stream>
+<Stream id="13104838" streamType="3" canAutoSync="0" codec="srt" index="22" bitrate="0" language="T&#252;rk&#231;e" languageTag="tr" languageCode="tur" dub="1" title="Turkish" displayTitle="T&#252;rk&#231;e" extendedDisplayTitle="Turkish (T&#252;rk&#231;e SRT)">
+</Stream>
+<Stream id="13104839" streamType="3" canAutoSync="0" codec="srt" index="23" bitrate="0" language="&#1059;&#1082;&#1088;&#1072;&#1111;&#1085;&#1089;&#1100;&#1082;&#1072;" languageTag="uk" languageCode="ukr" dub="1" title="Ukrainian" displayTitle="&#1059;&#1082;&#1088;&#1072;&#1111;&#1085;&#1089;&#1100;&#1082;&#1072;" extendedDisplayTitle="Ukrainian (&#1059;&#1082;&#1088;&#1072;&#1111;&#1085;&#1089;&#1100;&#1082;&#1072; SRT)">
+</Stream>
+</Part>
+</Media>
+<Image alt="The (Almost) Legends" type="coverPoster" url="/library/metadata/2943985/thumb/1771778463" />
+<Image alt="The (Almost) Legends" type="background" url="/library/metadata/2943985/art/1771778463" />
+<Image alt="The (Almost) Legends" type="clearLogo" url="/library/metadata/2943985/clearLogo/1771778463" />
+<Image alt="The (Almost) Legends" type="backgroundSquare" url="/library/metadata/2943985/squareArt/1771778463" />
+<UltraBlurColors topLeft="1e350a" topRight="ad1721" bottomRight="8c490e" bottomLeft="91441d" />
+<Genre id="41" filter="genre=41" tag="Comedy" />
+<Genre id="134" filter="genre=134" tag="Music" />
+<Genre id="135" filter="genre=135" tag="Musical" />
+<Country id="5916" filter="country=5916" tag="Mexico" />
+<Guid id="imdb://tt21737024" />
+<Guid id="tmdb://1148969" />
+<Guid id="tvdb://347581" />
+<Rating image="imdb://image.rating" value="6.4" type="audience" />
+<Rating image="rottentomatoes://image.rating.rotten" value="4.0" type="critic" />
+<Rating image="rottentomatoes://image.rating.upright" value="8.8" type="audience" />
+<Rating image="themoviedb://image.rating" value="7.8" type="audience" />
+<Director id="3748115" filter="director=3748115" tag="Ricardo Castro Vel&#225;zquez" tagKey="5d776f27ad5437001f80b930" />
+<Writer id="5628351" filter="writer=5628351" tag="Mar&#237;a Torres" tagKey="694ca1430d4be02030d8a698" thumb="https://metadata-static.plex.tv/f/people/f220f13dab4f4197320fe4ba834f8d30.jpg" />
+<Writer id="3748116" filter="writer=3748116" tag="Ricardo Castro Vel&#225;zquez" tagKey="5d776f27ad5437001f80b930" />
+<Writer id="2919371" filter="writer=2919371" tag="Enrique V&#225;zquez" tagKey="5d777090ad5437001f825875" />
+<Role id="707387" filter="actor=707387" tag="Benny Emmanuel" tagKey="5dce6ca2e2bf56001ec50507" role="Romeo" thumb="https://metadata-static.plex.tv/9/people/9977c0335f1b2abc2e95f0d5890a84f0.jpg" />
+<Role id="5628352" filter="actor=5628352" tag="Harold Azuara" tagKey="695a9a1e6d11a0e0b6290d33" role="Preciado" thumb="https://metadata-static.plex.tv/d/people/dfd915651b6941713cb598c9bea7680f.jpg" />
+<Role id="727536" filter="actor=727536" tag="Nora Vel&#225;zquez" tagKey="5d776a3223d5a3001f501876" role="Connie" thumb="https://metadata-static.plex.tv/f/people/f35c8f5284a73c662cdfee1649373500.jpg" />
+<Role id="3748117" filter="actor=3748117" tag="Ana Celeste" tagKey="6460cdc9ccab3cb9fdfc2589" role="Mar&#233;n" />
+<Role id="1578201" filter="actor=1578201" tag="Guillermo Quintanilla" tagKey="5d7768aa374a5b001fecc8f2" role="Valent&#237;n" thumb="https://metadata-static.plex.tv/people/5d7768aa374a5b001fecc8f2.jpg" />
+<Role id="3748118" filter="actor=3748118" tag="Esmeralda Soto" tagKey="601e5f031a86bd002dab8d9c" role="Dively" />
+<Role id="3748119" filter="actor=3748119" tag="Diego Sandoval" tagKey="6256e01c6e1024494cddeae4" role="Tino" thumb="https://metadata-static.plex.tv/c/people/ca17a73dabea1d722cb99c681d58bebc.jpg" />
+<Role id="177026" filter="actor=177026" tag="Dagoberto Gama" tagKey="5d77682661141d001fb13438" role="Don Tasio" thumb="https://metadata-static.plex.tv/f/people/f4eb8910f07130ae386100f1d439b969.jpg" />
+<Role id="3748120" filter="actor=3748120" tag="C&#233;sar Castillo" tagKey="60d4b18b8c9673002c0e2575" role="Mocorito" />
+<Role id="3748121" filter="actor=3748121" tag="Juan Andres Belgrave" tagKey="5d776a8e96b655001fdf242a" role="Sueco" thumb="https://metadata-static.plex.tv/4/people/49a35791966bfa661507f5a85350a994.jpg" />
+<Role id="3748122" filter="actor=3748122" tag="Paulina de Labra" tagKey="6323afd4f26ffb4da8230341" role="Raquel" />
+<Role id="188245" filter="actor=188245" tag="Silverio Palacios" tagKey="5d7768295af944001f1f753f" role="T&#237;o Cosme" thumb="https://metadata-static.plex.tv/5/people/5f9327b6f0965cfaabcc8bc2f3224b75.jpg" />
+<Role id="3748123" filter="actor=3748123" tag="Edith Nu&#241;ez" tagKey="64d8c6598df0d5897c6d3ba9" role="Mocorito&#39;s Daughter" />
+<Role id="3748124" filter="actor=3748124" tag="Amanda Polo" tagKey="64d8c6581615d9e94eccd09e" role="Esmeralda" />
+<Role id="3748125" filter="actor=3748125" tag="Ra&#250;l Gabriel Morales Ram&#237;rez" tagKey="64d8c6588df0d5897c6d3ba3" role="Preciado (10 Years)" />
+<Role id="3748126" filter="actor=3748126" tag="Emiliano Torres" tagKey="64d8c658746befeaf3f6ac80" role="Romeo (10 Years)" />
+<Role id="3748127" filter="actor=3748127" tag="Julio Patricio" tagKey="64d8c659dbc892347c31a6e1" role="Deleg&#225;ngster" />
+<Role id="3748128" filter="actor=3748128" tag="Carmen Garc&#237;a" tagKey="64d8c658dbc892347c31a6d8" role="Shopkeeper" />
+<Role id="3748129" filter="actor=3748129" tag="Gaby Navarro" tagKey="61990286046272df6574281e" role="Super Star Freski Bombis" />
+<Role id="3748130" filter="actor=3748130" tag="Victor Quintero" tagKey="64d8c659746befeaf3f6ac87" role="&#34;El Beb&#233;&#34;" />
+<Role id="3748131" filter="actor=3748131" tag="Alexander Show" tagKey="64d8c6590be3b47ed4eefb5d" role="Grullero" />
+<Role id="5381259" filter="actor=5381259" tag="Karem Momo" tagKey="6323b90fd87465e2e5ef3904" role="Silvia" thumb="https://metadata-static.plex.tv/6/people/6bdf933be851c2851c6114a678f5936a.jpg" />
+<Role id="3748133" filter="actor=3748133" tag="Chuy Gallardo" tagKey="64d8c65974da86424e515a80" role="Picky Boy" />
+<Role id="3748134" filter="actor=3748134" tag="Ana Chiquete" tagKey="64d8c65974da86424e515a7a" role="Picky Girl" />
+<Role id="3748135" filter="actor=3748135" tag="Mario Zamacona" tagKey="614c8ea5e59ead342702b7bb" role="The Beast" />
+<Role id="1363547" filter="actor=1363547" tag="Francisco Pita" tagKey="5d776ff8594b2b001e7438ca" role="The Divine Master" />
+<Role id="3748136" filter="actor=3748136" tag="Eduardo &#193;ngel Bravo" tagKey="64d8c6591615d9e94eccd0a8" role="Enrique Riquelme" />
+<Producer id="374029" filter="producer=374029" tag="M&#243;nica Lozano" tagKey="5d776b83ad5437001f7a1d32" thumb="https://metadata-static.plex.tv/5/people/5a99cb7f748551ba8a499c00db8f9dff.jpg" />
+<Producer id="2919760" filter="producer=2919760" tag="Eamon O&#39;Farrill" tagKey="5dce6d9cf4b82c0020657875" />
+<CommonSenseMedia id="3045496" oneLiner="Estranged brothers team up to win a race; language.">
+<AgeRating type="official" rating="2" age="14" />
+</CommonSenseMedia>
+<Field locked="1" name="editionTitle" />
+</Video>
+</MediaContainer>
