@@ -19,6 +19,12 @@ fn client_for(token: Option<&str>) -> PlexClient {
     }
 }
 
+fn client_for_host(token: Option<&str>, host: &str) -> PlexClient {
+    let mut c = client_for(token);
+    c.host = host.to_string();
+    c
+}
+
 // The identity API base is process-wide config, so all scenarios run
 // sequentially inside one test to avoid racing the env var and to keep
 // cache state predictable.
@@ -132,7 +138,9 @@ async fn identity_resolution_scenarios() {
     // --- cached identity survives an upstream outage ---
     // jodie-token is cached from earlier; make plex.tv fail for everyone.
     let outage = mock.mock(|when, then| {
-        when.method(GET).path("/api/v2/user");
+        when.method(GET)
+            .path("/api/v2/user")
+            .header("X-Plex-Token", "good-token");
         then.status(503);
     });
 
@@ -153,4 +161,39 @@ async fn identity_resolution_scenarios() {
         ),
     }
     drop(outage);
+
+    // --- shared (server-scoped) token resolves via resources endpoint ---
+    // plex.tv /user rejects it; /resources reveals sourceTitle for our
+    // machineIdentifier.
+    let _shared_user = mock.mock(|when, then| {
+        when.method(GET)
+            .path("/api/v2/user")
+            .header("X-Plex-Token", "shared-token");
+        then.status(401)
+            .header("content-type", "application/json")
+            .body(r#"{"errors":[{"code":1001,"message":"User could not be authenticated","status":401}]}"#);
+    });
+
+    let shared_resources = mock.mock(|when, then| {
+        when.method(GET)
+            .path("/api/v2/resources")
+            .header("X-Plex-Token", "shared-token");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"[{"clientIdentifier":"test-machine","provides":"server","sourceTitle":"jodiemy3","ownerId":839319108,"accessToken":"scoped"}]"#);
+    });
+
+    let root_mock = mock.mock(|when, then| {
+        when.method(GET).path("/");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"MediaContainer":{"machineIdentifier":"test-machine"}}"#);
+    });
+
+    let client = client_for_host(Some("shared-token"), &mock.base_url());
+    let identity = client.get_current_user().await.unwrap();
+    assert_eq!(identity.username, "jodiemy3");
+    assert_eq!(identity.uuid, "shared-jodiemy3");
+    assert_eq!(root_mock.hits(), 1);
+    assert_eq!(shared_resources.hits(), 1);
 }

@@ -97,6 +97,15 @@ fn hash_token(token: &str) -> String {
     data_encoding::HEXLOWER.encode(&digest)
 }
 
+/// Cached machineIdentifier of the upstream Plex server, keyed by upstream
+/// host, used to recognise which resource entry in a shared user's
+/// plex.tv resources list is ours.
+static SERVER_MACHINE_IDS: Lazy<Cache<String, String>> = Lazy::new(|| {
+    Cache::builder()
+        .max_capacity(10)
+        .build()
+});
+
 struct Retry401;
 impl RetryableStrategy for Retry401 {
     fn handle(
@@ -415,7 +424,20 @@ impl PlexClient {
             salvo::http::StatusCode::OK => {}
             salvo::http::StatusCode::UNAUTHORIZED
             | salvo::http::StatusCode::FORBIDDEN => {
-                return Err(IdentityError::InvalidToken)
+                let body = res.text().await.unwrap_or_default();
+                tracing::warn!(
+                    body_snippet = %&body.chars().take(300).collect::<String>(),
+                    "plex.tv rejected global identity verification, trying shared-token resolution"
+                );
+                // Server-scoped tokens (issued to shared users when a client
+                // connects to an invited server) are rejected by
+                // plex.tv/api/v2/user. Resolve them via the resources
+                // endpoint instead, which reveals which shared user the
+                // token belongs to.
+                if let Some(identity) = self.resolve_shared_user(token).await? {
+                    return Ok(identity);
+                }
+                return Err(IdentityError::InvalidToken);
             }
             status => {
                 return Err(IdentityError::Upstream(anyhow::anyhow!(
@@ -450,6 +472,153 @@ impl PlexClient {
             uuid: raw.uuid,
             username,
         })
+    }
+
+    /// Resolve a *server-scoped* token (issued to shared users) into a
+    /// `UserIdentity`.
+    ///
+    /// plex.tv/api/v2/user rejects server-scoped tokens, but the resources
+    /// endpoint accepts them and marks our server's entry with `sourceTitle`
+    /// — the username of the account the token belongs to.
+    async fn resolve_shared_user(
+        &self,
+        token: &str,
+    ) -> Result<Option<UserIdentity>, IdentityError> {
+        let machine_id = self.server_machine_id().await?;
+
+        let base = Config::figment()
+            .extract::<Config>()
+            .map(|c| c.identity_api_base())
+            .unwrap_or_else(|_| "https://plex.tv".to_string());
+        let url = format!("{base}/api/v2/resources?includeHttps=1&includeRelay=0");
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            "X-Plex-Token",
+            header::HeaderValue::from_str(token)
+                .map_err(|e| IdentityError::Upstream(anyhow::anyhow!("bad token header: {e}")))?,
+        );
+        if let Some(cid) = &self.context.client_identifier {
+            if let Ok(v) = header::HeaderValue::from_str(cid) {
+                headers.insert("X-Plex-Client-Identifier", v);
+            }
+        }
+        headers.insert(ACCEPT, header::HeaderValue::from_static("application/json"));
+
+        tracing::debug!(url = %url, "Shared-token resources lookup");
+        let res = self
+            .http_client
+            .get(url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| IdentityError::Upstream(anyhow::anyhow!("resources request failed: {e}")))?;
+        tracing::debug!(status = %res.status(), "Shared-token resources response");
+
+        match res.status() {
+            salvo::http::StatusCode::OK => {}
+            salvo::http::StatusCode::UNAUTHORIZED
+            | salvo::http::StatusCode::FORBIDDEN
+            | salvo::http::StatusCode::NOT_FOUND => {
+                return Ok(None); // genuinely invalid token or no visibility
+            }
+            status => {
+                return Err(IdentityError::Upstream(anyhow::anyhow!(
+                    "unexpected status from resources API: {status}"
+                )))
+            }
+        }
+
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RawResource {
+            #[serde(default)]
+            client_identifier: Option<String>,
+            #[serde(default)]
+            provides: Option<String>,
+            #[serde(default)]
+            source_title: Option<String>,
+            #[serde(default)]
+            owner_id: Option<i64>,
+            #[serde(default)]
+            access_token: Option<String>,
+        }
+
+        let resources: Vec<RawResource> = res.json().await.map_err(|e| {
+            IdentityError::Upstream(anyhow::anyhow!("resources response parse failed: {e}"))
+        })?;
+
+        tracing::debug!(
+            machine_id = %machine_id,
+            count = resources.len(),
+            entries = ?resources.iter().map(|r| (r.client_identifier.clone(), r.provides.clone(), r.source_title.clone())).collect::<Vec<_>>(),
+            "Shared-token resources scan"
+        );
+        for r in resources {
+            let is_ours = r.client_identifier.as_deref() == Some(machine_id.as_str())
+                && r.provides.as_deref().map(|p| p.contains("server")).unwrap_or(false);
+            if !is_ours {
+                continue;
+            }
+            match r.source_title.filter(|s| !s.is_empty()) {
+                Some(username) => {
+                    tracing::info!(
+                        username = %username,
+                        "Shared-token identity resolved via plex.tv resources"
+                    );
+                    return Ok(Some(UserIdentity {
+                        id: r.owner_id.unwrap_or(0),
+                        // Shared users have no distinct uuid exposed here; use
+                        // a stable synthetic form. Policies should target
+                        // shared users by USERNAME.
+                        uuid: format!("shared-{username}"),
+                        username,
+                    }));
+                }
+                None => {
+                    // Our entry without sourceTitle means an owner-scoped
+                    // token; shouldn't reach here (global path succeeded),
+                    // but treat as unresolved rather than guessing.
+                    return Ok(None);
+                }
+            }
+        }
+
+        // Token is valid but has no access to THIS server: not one of ours.
+        Ok(None)
+    }
+
+    async fn server_machine_id(&self) -> Result<String, IdentityError> {
+        if let Some(id) = SERVER_MACHINE_IDS.get(&self.host).await {
+            return Ok(id);
+        }
+
+        let url = format!("{}/", self.host);
+        let res = self
+            .http_client
+            .get(url)
+            .header(ACCEPT, header::HeaderValue::from_static("application/json"))
+            .send()
+            .await
+            .map_err(|e| IdentityError::Upstream(anyhow::anyhow!("server root request failed: {e}")))?;
+
+        #[derive(Debug, serde::Deserialize)]
+        struct RawRoot {
+            #[serde(rename = "MediaContainer")]
+            container: RawRootContainer,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        struct RawRootContainer {
+            #[serde(rename = "machineIdentifier")]
+            machine_identifier: String,
+        }
+
+        let root: RawRoot = res.json().await.map_err(|e| {
+            IdentityError::Upstream(anyhow::anyhow!("server root parse failed: {e}"))
+        })?;
+
+        let id = root.container.machine_identifier;
+        SERVER_MACHINE_IDS.insert(self.host.clone(), id.clone()).await;
+        Ok(id)
     }
 
     pub async fn get_cached(
@@ -658,7 +827,9 @@ impl PlexClient {
                 reqwest::Client::builder()
                     //.default_headers(headers)
                     .gzip(true)
-                    .timeout(Duration::from_secs(30))
+                    // Large libraries can exceed 30s on section queries;
+                    // the outer request timeout is 200s so stay under it.
+                    .timeout(Duration::from_secs(120))
                     .build()
                     .unwrap(),
             )
