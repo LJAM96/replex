@@ -437,6 +437,29 @@ impl PlexClient {
                 if let Some(identity) = self.resolve_shared_user(token).await? {
                     return Ok(identity);
                 }
+                // Last resort for clients whose tokens are opaque to
+                // plex.tv (e.g. preview apps using PMS-scoped session
+                // tokens): trust the X-Plex-Username header. Opt-in only,
+                // because it is spoofable by anyone with server access.
+                let config: Config = Config::figment().extract().unwrap();
+                if config.allow_username_fallback {
+                    if let Some(username) = self
+                        .context
+                        .username
+                        .clone()
+                        .filter(|u| !u.is_empty())
+                    {
+                        tracing::warn!(
+                            username = %username,
+                            "Identity resolved via unverified username header (allow_username_fallback)"
+                        );
+                        return Ok(UserIdentity {
+                            id: 0,
+                            uuid: format!("unverified-{username}"),
+                            username,
+                        });
+                    }
+                }
                 return Err(IdentityError::InvalidToken);
             }
             status => {
@@ -593,10 +616,15 @@ impl PlexClient {
         }
 
         let url = format!("{}/", self.host);
+        let mut headers = self.default_headers.clone();
+        headers.insert(
+            ACCEPT,
+            header::HeaderValue::from_static("application/json"),
+        );
         let res = self
             .http_client
             .get(url)
-            .header(ACCEPT, header::HeaderValue::from_static("application/json"))
+            .headers(headers)
             .send()
             .await
             .map_err(|e| IdentityError::Upstream(anyhow::anyhow!("server root request failed: {e}")))?;
@@ -612,7 +640,13 @@ impl PlexClient {
             machine_identifier: String,
         }
 
-        let root: RawRoot = res.json().await.map_err(|e| {
+        let body = res.text().await.unwrap_or_default();
+        let root: RawRoot = serde_json::from_str(&body).map_err(|e| {
+            tracing::warn!(
+                snippet = %&body.chars().take(250).collect::<String>(),
+                error = %e,
+                "server root parse failed"
+            );
             IdentityError::Upstream(anyhow::anyhow!("server root parse failed: {e}"))
         })?;
 

@@ -131,6 +131,11 @@ pub struct Config {
         deserialize_with = "figment::util::bool_from_str_or_int"
     )]
     pub strict_stream_guard: bool,
+    #[serde(
+        default = "default_as_false",
+        deserialize_with = "figment::util::bool_from_str_or_int"
+    )]
+    pub allow_username_fallback: bool,
     #[serde(default = "default_identity_cache_ttl")]
     pub identity_cache_ttl: u64,
     pub identity_api_base: Option<String>,
