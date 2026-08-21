@@ -42,6 +42,9 @@ pub struct PolicyEntry {
     pub username: Option<String>,
     pub uuid: Option<String>,
     pub max_resolution: ResolutionLimit,
+    /// Optional maximum video bitrate in kbps. When set, playback requests
+    /// requesting more are capped to this value.
+    pub max_bitrate: Option<i64>,
 }
 
 /// A one-entry JSON deserializer target used while parsing config.
@@ -52,6 +55,8 @@ struct RawPolicyEntry {
     #[serde(default)]
     uuid: Option<String>,
     max_resolution: String,
+    #[serde(default)]
+    max_bitrate: Option<i64>,
 }
 
 pub fn deserialize_user_resolution_policies<'de, D>(
@@ -88,6 +93,7 @@ where
             username: entry.username,
             uuid: entry.uuid,
             max_resolution,
+            max_bitrate: entry.max_bitrate,
         });
     }
     Ok(out)
@@ -108,12 +114,15 @@ pub struct UserIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolutionPolicy {
     pub limit: ResolutionLimit,
+    /// Maximum video bitrate in kbps, when the matched policy sets one.
+    pub max_bitrate: Option<i64>,
 }
 
 impl ResolutionPolicy {
     pub fn unrestricted() -> Self {
         ResolutionPolicy {
             limit: ResolutionLimit::Unlimited,
+            max_bitrate: None,
         }
     }
 
@@ -143,15 +152,20 @@ pub fn resolve_policy(
         });
 
     let limit = matched.map_or(default_limit, |p| p.max_resolution);
+    let max_bitrate = matched.and_then(|p| p.max_bitrate);
 
     tracing::debug!(
         username = %identity.username,
         uuid = %identity.uuid,
         ?limit,
+        ?max_bitrate,
         "Resolution policy matched"
     );
 
-    ResolutionPolicy { limit }
+    ResolutionPolicy {
+        limit,
+        max_bitrate,
+    }
 }
 
 /// Classify a media version's resolution.
@@ -313,9 +327,7 @@ mod tests {
         assert_eq!(classify(&m), Some(ResolutionLimit::P1080));
         assert!(media_allowed(
             &m,
-            &ResolutionPolicy {
-                limit: ResolutionLimit::P1080
-            }
+            &ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None }
         ));
     }
 
@@ -325,9 +337,7 @@ mod tests {
         assert_eq!(classify(&m), Some(ResolutionLimit::P1080));
         assert!(media_allowed(
             &m,
-            &ResolutionPolicy {
-                limit: ResolutionLimit::P1080
-            }
+            &ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None }
         ));
     }
 
@@ -337,9 +347,7 @@ mod tests {
         assert_eq!(classify(&m), Some(ResolutionLimit::P2160));
         assert!(!media_allowed(
             &m,
-            &ResolutionPolicy {
-                limit: ResolutionLimit::P1080
-            }
+            &ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None }
         ));
     }
 
@@ -351,9 +359,7 @@ mod tests {
         assert_eq!(classify(&m), Some(ResolutionLimit::P2160));
         assert!(!media_allowed(
             &m,
-            &ResolutionPolicy {
-                limit: ResolutionLimit::P1080
-            }
+            &ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None }
         ));
     }
 
@@ -363,9 +369,7 @@ mod tests {
         assert_eq!(classify(&m), Some(ResolutionLimit::P2160));
         assert!(media_allowed(
             &m,
-            &ResolutionPolicy {
-                limit: ResolutionLimit::P2160
-            }
+            &ResolutionPolicy { limit: ResolutionLimit::P2160, max_bitrate: None }
         ));
     }
 
@@ -376,9 +380,7 @@ mod tests {
         assert_eq!(classify(&m), None);
         assert!(!media_allowed(
             &m,
-            &ResolutionPolicy {
-                limit: ResolutionLimit::P2160
-            }
+            &ResolutionPolicy { limit: ResolutionLimit::P2160, max_bitrate: None }
         ));
     }
 
@@ -401,9 +403,7 @@ mod tests {
         assert_eq!(classify(&m), None);
         assert!(!media_allowed(
             &m,
-            &ResolutionPolicy {
-                limit: ResolutionLimit::P1080
-            }
+            &ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None }
         ));
         assert!(media_allowed(&m, &ResolutionPolicy::unrestricted()));
     }
@@ -419,9 +419,7 @@ mod tests {
 
     #[test]
     fn allowed_media_filters_for_1080_user() {
-        let policy = ResolutionPolicy {
-            limit: ResolutionLimit::P1080,
-        };
+        let policy = ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None };
         let allowed = allowed_media(&sample_versions(), &policy);
         assert_eq!(allowed.len(), 1);
         assert_eq!(allowed[0].video_resolution.as_deref(), Some("1080"));
@@ -429,26 +427,20 @@ mod tests {
 
     #[test]
     fn allowed_media_keeps_everything_for_4k_user() {
-        let policy = ResolutionPolicy {
-            limit: ResolutionLimit::P2160,
-        };
+        let policy = ResolutionPolicy { limit: ResolutionLimit::P2160, max_bitrate: None };
         assert_eq!(allowed_media(&sample_versions(), &policy).len(), 2);
     }
 
     #[test]
     fn allowed_media_empty_when_nothing_permitted() {
         let only_4k = vec![media(Some("4k"), Some(3840), Some(2160))];
-        let policy = ResolutionPolicy {
-            limit: ResolutionLimit::P1080,
-        };
+        let policy = ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None };
         assert!(allowed_media(&only_4k, &policy).is_empty());
     }
 
     #[test]
     fn best_allowed_prefers_closest_to_screen_density() {
-        let policy = ResolutionPolicy {
-            limit: ResolutionLimit::P2160,
-        };
+        let policy = ResolutionPolicy { limit: ResolutionLimit::P2160, max_bitrate: None };
         let best =
             best_allowed_media(&sample_versions(), &policy, Some((1920, 1080)))
                 .unwrap();
@@ -462,9 +454,7 @@ mod tests {
 
     #[test]
     fn best_allowed_respects_account_limit_over_device() {
-        let policy = ResolutionPolicy {
-            limit: ResolutionLimit::P1080,
-        };
+        let policy = ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None };
         let best = best_allowed_media(
             &sample_versions(),
             &policy,
@@ -477,9 +467,7 @@ mod tests {
     #[test]
     fn best_allowed_none_when_all_blocked() {
         let only_4k = vec![media(Some("4k"), Some(3840), Some(2160))];
-        let policy = ResolutionPolicy {
-            limit: ResolutionLimit::P1080,
-        };
+        let policy = ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None };
         assert!(best_allowed_media(&only_4k, &policy, None).is_none());
     }
 
@@ -504,6 +492,7 @@ mod tests {
             username: e.username,
             uuid: e.uuid,
             max_resolution: ResolutionLimit::parse(&e.max_resolution).unwrap(),
+            max_bitrate: None,
         })
         .collect();
 
@@ -531,11 +520,13 @@ mod tests {
                 username: Some("jodie".to_string()),
                 uuid: None,
                 max_resolution: ResolutionLimit::P1080,
+                max_bitrate: None,
             },
             PolicyEntry {
                 username: Some("someone-else".to_string()),
                 uuid: Some("uuid-jodie".to_string()),
                 max_resolution: ResolutionLimit::P2160,
+                max_bitrate: None,
             },
         ];
         let policy = resolve_policy(
@@ -553,6 +544,7 @@ mod tests {
             username: Some("jodie".to_string()),
             uuid: None,
             max_resolution: ResolutionLimit::P1080,
+            max_bitrate: None,
         }];
         let policy = resolve_policy(
             &policies,
@@ -568,6 +560,7 @@ mod tests {
             username: Some("jodie".to_string()),
             uuid: None,
             max_resolution: ResolutionLimit::P1080,
+            max_bitrate: None,
         }];
         let policy = resolve_policy(
             &policies,
@@ -590,6 +583,7 @@ mod tests {
             username: Some("Jodie".to_string()),
             uuid: None,
             max_resolution: ResolutionLimit::P1080,
+            max_bitrate: None,
         }];
         let policy = resolve_policy(
             &policies,

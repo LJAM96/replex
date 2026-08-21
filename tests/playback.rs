@@ -14,8 +14,9 @@ async fn playback_enforcement_scenarios() {
     std::env::set_var("REPLEX_RESOLUTION_POLICY_ENABLED", "true");
     std::env::set_var(
         "REPLEX_USER_RESOLUTION_POLICIES",
-        r#"[{"username": "jodiemy3", "max_resolution": "1080"},
-            {"username": "sd-only", "max_resolution": "480"}]"#,
+        r#"[{"username": "jodiemy3", "max_resolution": "1080", "max_bitrate": 4000},
+            {"username": "sd-only", "max_resolution": "480"},
+            {"username": "capped-only", "max_resolution": "unlimited", "max_bitrate": 8000}]"#,
     );
     std::env::set_var("REPLEX_RESOLUTION_DEFAULT", "unlimited");
 
@@ -49,6 +50,14 @@ async fn playback_enforcement_scenarios() {
         then.status(200)
             .header("content-type", "application/json")
             .body(r#"{"id": 9, "uuid": "uuid-sd", "username": "sd-only"}"#);
+    });
+    let _capped_only = mock.mock(|when, then| {
+        when.method(GET)
+            .path("/api/v2/user")
+            .header("X-Plex-Token", "capped-token");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"id": 11, "uuid": "uuid-capped", "username": "capped-only"}"#);
     });
 
     // Item: index 0 = 1080p (id 1), index 1 = 4K (id 2)
@@ -222,4 +231,73 @@ async fn playback_enforcement_scenarios() {
         StatusCode::FORBIDDEN,
         "no permitted version must yield 403"
     );
+
+    // --- bitrate cap: request above cap is lowered ---
+    // jodiemy3 has max_bitrate 4000; she asks for 20000.
+    let capped = mock.mock(|when, then| {
+        when.method(GET)
+            .path("/video/:/transcode/universal/decision")
+            .query_param("maxVideoBitrate", "4000");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"MediaContainer":{}}"#);
+    });
+
+    let status =
+        send_decision(&service, "jodie-token", "mediaIndex=0&scn=7&maxVideoBitrate=20000", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(capped.hits() >= 1, "bitrate must be capped to the policy max");
+
+    // --- bitrate cap: request below cap is left alone ---
+    let below = mock.mock(|when, then| {
+        when.method(GET)
+            .path("/video/:/transcode/universal/decision")
+            .query_param("maxVideoBitrate", "2000");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"MediaContainer":{}}"#);
+    });
+
+    let status =
+        send_decision(&service, "jodie-token", "mediaIndex=0&scn=8&maxVideoBitrate=2000", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(below.hits() >= 1, "lower requests must not be raised");
+
+    // --- bitrate-only policy: unlimited resolution user still capped ---
+    let capped_only = mock.mock(|when, then| {
+        when.method(GET)
+            .path("/video/:/transcode/universal/decision")
+            .query_param("maxVideoBitrate", "8000")
+            .query_param("mediaIndex", "1")
+            .query_param("scn", "9");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"MediaContainer":{}}"#);
+    });
+
+    // capped-only is resolution-unlimited: mediaIndex=1 (4K) passes through,
+    // but the bitrate is capped.
+    let status =
+        send_decision(&service, "capped-token", "mediaIndex=1&scn=9&maxVideoBitrate=50000", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        capped_only.hits() >= 1,
+        "resolution-unlimited users with a bitrate cap must still be capped"
+    );
+
+    // --- no bitrate requested: cap injected ---
+    let injected = mock.mock(|when, then| {
+        when.method(GET)
+            .path("/video/:/transcode/universal/decision")
+            .query_param("maxVideoBitrate", "8000")
+            .query_param("mediaIndex", "1")
+            .query_param("scn", "10");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"MediaContainer":{}}"#);
+    });
+
+    let status = send_decision(&service, "capped-token", "mediaIndex=1&scn=10", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(injected.hits() >= 1, "cap must be injected when absent");
 }

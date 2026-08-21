@@ -275,9 +275,7 @@ mod tests {
     // pure recursion logic tested without the network
     #[test]
     fn strip_recursive_removes_only_prohibited() {
-        let policy = ResolutionPolicy {
-            limit: ResolutionLimit::P1080,
-        };
+        let policy = ResolutionPolicy { limit: ResolutionLimit::P1080, max_bitrate: None };
         let json = r#"{"ratingKey": "1", "title": "Show", "type": "show", "Metadata": [
             {"ratingKey": "10", "key": "/library/metadata/10", "title": "Ep 10", "type": "episode",
              "Media": [{"id": 11, "videoResolution": "4k"}, {"id": 12, "videoResolution": "1080"}]},

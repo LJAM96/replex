@@ -1514,6 +1514,33 @@ async fn enforce_resolution_policy(
         config.resolution_default,
         &identity,
     );
+    if policy.is_unrestricted() && policy.max_bitrate.is_none() {
+        return Ok(());
+    }
+
+    // Per-user bitrate cap. Independent of the resolution limit, so a user
+    // can be resolution-unrestricted yet bandwidth-capped.
+    if let Some(cap) = policy.max_bitrate {
+        let mut queries = req.queries().clone();
+        let current = queries
+            .get("maxVideoBitrate")
+            .or_else(|| queries.get("videoBitrate"))
+            .and_then(|v| v.parse::<i64>().ok());
+        let effective = current.map_or(cap, |c| c.min(cap));
+        if current.map(|c| c > effective).unwrap_or(true) {
+            tracing::info!(
+                username = %identity.username,
+                requested = ?current,
+                capped_to = effective,
+                "Capping video bitrate"
+            );
+            queries.remove("videoBitrate");
+            queries.remove("maxVideoBitrate");
+            queries.insert("maxVideoBitrate".to_string(), effective.to_string());
+            replace_query(queries, req);
+        }
+    }
+
     if policy.is_unrestricted() {
         return Ok(());
     }

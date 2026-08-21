@@ -119,7 +119,7 @@ REPLEX_STRICT_STREAM_GUARD=false
 | Setting | Default | Description |
 |---|---|---|
 | REPLEX_RESOLUTION_POLICY_ENABLED | false | Master switch. When false, behaviour is identical to stock Replex and the metadata routes are not even registered. |
-| REPLEX_USER_RESOLUTION_POLICIES | | JSON array of per-account rules. Each entry needs `username` and/or `uuid` plus `max_resolution` (`480`, `720`, `1080`, `4k`, `unlimited`). UUID is the stable identifier (visible in server logs at identity resolution time); username matching is case sensitive. |
+| REPLEX_USER_RESOLUTION_POLICIES | | JSON array of per-account rules. Each entry needs `username` and/or `uuid` plus `max_resolution` (`480`, `720`, `1080`, `4k`, `unlimited`). Optional `max_bitrate` (kbps) caps playback bitrate for that account — it applies even when the resolution is `unlimited`, and requests above the cap are lowered while lower requests are left alone. UUID is the stable identifier (visible in server logs at identity resolution time); username matching is case sensitive. |
 | REPLEX_RESOLUTION_DEFAULT | unlimited | Limit applied to accounts without an explicit rule. |
 | REPLEX_RESOLUTION_POLICY_FAIL_CLOSED | true | If the account identity cannot be verified (plex.tv unreachable, invalid token) playback requests fail with 503 instead of being allowed unrestricted. Cached identities mean brief plex.tv outages are invisible. |
 | REPLEX_STRICT_STREAM_GUARD | false | Reject direct `/library/parts` requests for parts Replex has never seen in metadata or playback (hand-crafted deep links). Disabled keeps legacy behaviour for unknown parts. |
@@ -149,6 +149,9 @@ Requirements and limitations:
   4K file down to 1080p for restricted users.
 * Remote playback quality limits configured inside Plex itself still apply on
   top of these policies.
+* Per-account `max_bitrate` is incompatible with the global
+  `REPLEX_FORCE_MAXIMUM_QUALITY` — that setting strips bitrate parameters for
+  everyone and will override individual caps. Do not enable both.
 
 ## Interleaved rows
 
