@@ -11,3 +11,6 @@ tests/mock/out/baseline/library_sections_all.json
 resretrict.md
 implementation-plan.md
 phase0-checklist.md
+
+# local deploy helper, never commit (could be filled with real tokens)
+portainer-env.txt
