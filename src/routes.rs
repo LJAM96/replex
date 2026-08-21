@@ -163,6 +163,18 @@ pub fn route() -> Router {
         );
     }
 
+    // Continue Watching is fetched by clients from its own endpoint; route
+    // it through the hub transform chain so hero styling (REPLEX_HERO_ROWS)
+    // and other hub transforms apply to it too.
+    router = router.push(
+        Router::new()
+            .path(PLEX_CONTINUE_WATCHING)
+            .hoop(transform_req_include_guids)
+            .hoop(transform_req_android)
+            .hoop(proxy_for_transform)
+            .get(transform_hubs_response),
+    );
+
     router = router
         .push(
             Router::new()
@@ -815,6 +827,17 @@ pub async fn transform_req_content_directory(
     // The new experience sends neither — in that case we let the request pass
     // through unmodified so the proxy doesn't return an empty container.
     if let Some(ref pinned) = context.clone().pinned_content_directory_id {
+        // Mobile/tv clients fire only ONE promoted request per refresh (a
+        // single slot). Giving them the intentional-empty second-slot
+        // response leaves their home screen with nothing on it, so they
+        // always get the full merged payload instead. Web-style clients
+        // fetch every slot and rely on the empty non-first responses to
+        // avoid duplicated rows, so keep stock behaviour for them.
+        let mobile_client = matches!(
+            context.platform.clone().unwrap_or_default(),
+            Platform::Ios | Platform::Android | Platform::TvOS
+        );
+
         let is_first = context
             .clone()
             .content_directory_id
@@ -822,7 +845,7 @@ pub async fn transform_req_content_directory(
             .map(|c| c[0] == pinned[0])
             .unwrap_or(true); // absent → traiter comme premier directory
 
-        if !is_first {
+        if !is_first && !mobile_client {
             // Not the first directory: return empty container so only the
             // first slot triggers a full merged fetch.
             let mut container: MediaContainerWrapper<MediaContainer> =
@@ -836,8 +859,9 @@ pub async fn transform_req_content_directory(
             return;
         }
 
-        // First directory: expand contentDirectoryID to all pinned IDs so
-        // HubInterleaveTransform can merge hubs from every library.
+        // First directory (or mobile client): expand contentDirectoryID to
+        // all pinned IDs so HubInterleaveTransform can merge hubs from every
+        // library. Repeat mobile fetches are served from cache.
         add_query_param_salvo(
             req,
             "contentDirectoryID".to_string(),
