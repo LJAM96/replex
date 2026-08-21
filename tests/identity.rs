@@ -128,4 +128,29 @@ async fn identity_resolution_scenarios() {
     let identity = client.get_current_user().await.unwrap();
     assert_eq!(identity.username, "Title Only");
     assert_eq!(fallback_mock.hits(), 1);
+
+    // --- cached identity survives an upstream outage ---
+    // jodie-token is cached from earlier; make plex.tv fail for everyone.
+    let outage = mock.mock(|when, then| {
+        when.method(GET).path("/api/v2/user");
+        then.status(503);
+    });
+
+    let client = client_for(Some("good-token"));
+    let recovered = client.get_current_user().await.unwrap();
+    assert_eq!(
+        recovered.username, "jodiemy3",
+        "cached identity must survive upstream outage"
+    );
+
+    // A brand new token cannot resolve while plex.tv is failing.
+    let client = client_for(Some("never-seen-token"));
+    match client.get_current_user().await {
+        Err(IdentityError::Upstream(_)) => {}
+        other => panic!(
+            "expected Upstream error during outage, got {:?}",
+            other.map(|i| i.username)
+        ),
+    }
+    drop(outage);
 }

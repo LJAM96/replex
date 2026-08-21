@@ -98,6 +98,58 @@ Settings are set via [environment variables](https://kinsta.com/knowledgebase/wh
 | REPLEX_REDIRECT_STREAMS_HOST  | REPLEX_HOST    | Alternative streams endpoint                                         |
 | REPLEX_CACHE_TTL          | 1800    	 | Time to live for general caches in seconds. Set to 0 to disable (higly recommended to keep enabled besides testing purposes).  |
 
+## Per-user resolution restrictions
+
+Restrict individual Plex accounts to a maximum media resolution while keeping
+everything in one library. 1080p and 4K versions stay merged under the same
+item; restricted accounts simply never see or reach the versions above their
+limit.
+
+```text
+REPLEX_RESOLUTION_POLICY_ENABLED=true
+
+REPLEX_USER_RESOLUTION_POLICIES=[{"username": "jodie", "max_resolution": "1080"},
+                                 {"username": "luke", "max_resolution": "4k"}]
+
+REPLEX_RESOLUTION_DEFAULT=unlimited
+REPLEX_RESOLUTION_POLICY_FAIL_CLOSED=true
+REPLEX_STRICT_STREAM_GUARD=false
+```
+
+| Setting | Default | Description |
+|---|---|---|
+| REPLEX_RESOLUTION_POLICY_ENABLED | false | Master switch. When false, behaviour is identical to stock Replex and the metadata routes are not even registered. |
+| REPLEX_USER_RESOLUTION_POLICIES | | JSON array of per-account rules. Each entry needs `username` and/or `uuid` plus `max_resolution` (`480`, `720`, `1080`, `4k`, `unlimited`). UUID is the stable identifier (visible in server logs at identity resolution time); username matching is case sensitive. |
+| REPLEX_RESOLUTION_DEFAULT | unlimited | Limit applied to accounts without an explicit rule. |
+| REPLEX_RESOLUTION_POLICY_FAIL_CLOSED | true | If the account identity cannot be verified (plex.tv unreachable, invalid token) playback requests fail with 503 instead of being allowed unrestricted. Cached identities mean brief plex.tv outages are invisible. |
+| REPLEX_STRICT_STREAM_GUARD | false | Reject direct `/library/parts` requests for parts Replex has never seen in metadata or playback (hand-crafted deep links). Disabled keeps legacy behaviour for unknown parts. |
+| REPLEX_IDENTITY_CACHE_TTL | 3600 | How long verified account identities are cached, seconds. |
+| REPLEX_IDENTITY_API_BASE | https://plex.tv | Identity API override, for testing only. |
+
+How it works:
+
+* The request's own Plex token is verified against plex.tv to identify the
+  account — client-supplied usernames are ignored.
+* Metadata responses have prohibited versions removed before clients see
+  them; items that only exist above the limit disappear entirely.
+* Playback requests with a version above the limit are rewritten to the best
+  permitted version; transcode fallback can never cross the limit.
+* Direct media part URLs belonging to prohibited versions return 403.
+* Accounts without a rule (or `unlimited`) behave exactly as stock Replex.
+
+Requirements and limitations:
+
+* All client traffic must flow through Replex. Clients that connect directly
+  to the Plex server bypass every restriction: disable GDM, block direct
+  access where possible, and set Replex as the Custom server access URL
+  (see [Remote access](#remote-access-force-clients-to-use-the-proxy)).
+* Only invited shared accounts are supported. Home/managed users authenticate
+  differently and are not covered.
+* This restricts which source files may be accessed, it does not transcode a
+  4K file down to 1080p for restricted users.
+* Remote playback quality limits configured inside Plex itself still apply on
+  top of these policies.
+
 ## Interleaved rows
 
 Collections hubs with the same name from different libraries will be merged into one on the home screen.

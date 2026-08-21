@@ -1,4 +1,4 @@
-FROM rust:1.75-bookworm as builder
+FROM rust:1-bookworm as builder
 
 WORKDIR /app/src
 RUN USER=root cargo new --bin replex
