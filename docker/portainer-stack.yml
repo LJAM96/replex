@@ -1,0 +1,75 @@
+# Portainer stack for Replex with per-user resolution restrictions.
+#
+# Deploy: Portainer -> Stacks -> Add stack
+#   Option A (recommended): paste this file into the web editor.
+#   Option B: deploy from this git repository directly.
+#
+# Secrets are NOT inline: add the variables listed under "Required
+# environment variables" in the stack's Environment variables tab so they
+# never live inside the stack definition.
+
+services:
+  replex:
+    # Builds from your fork's main branch. Portainer clones + builds on
+    # deploy; subsequent "Update the stack" pulls latest and rebuilds with
+    # "Re-pull image and redeploy" / build cache as appropriate.
+    build:
+      context: https://github.com/LJAM96/replex.git#main
+      dockerfile: docker/Dockerfile
+    container_name: replex
+    restart: unless-stopped
+    ports:
+      # Host port 8443 -> container 80.
+      # Point Plex's Custom server access URL at http://<vps-ip>:8443
+      # (ideally fronted by HTTPS - see note at bottom).
+      - "${REPLEX_PORT:-8443}:80"
+    environment:
+      # --- upstream Plex ---
+      REPLEX_HOST: ${REPLEX_HOST}
+      REPLEX_TOKEN: ${REPLEX_TOKEN}
+
+      # --- per-user resolution restrictions ---
+      REPLEX_RESOLUTION_POLICY_ENABLED: "true"
+      REPLEX_RESOLUTION_DEFAULT: "unlimited"
+      REPLEX_RESOLUTION_POLICY_FAIL_CLOSED: "true"
+      REPLEX_HIDDEN_COLLECTIONS: ${REPLEX_HIDDEN_COLLECTIONS}
+      REPLEX_USER_RESOLUTION_POLICIES: >-
+        ${REPLEX_USER_RESOLUTION_POLICIES}
+
+      # --- presentation / playback behaviour ---
+      RELEX_INTERLEAVE: "true"
+      REPLEX_HUB_RESTRICTIONS: "true"
+      RELEX_AUTO_SELECT_VERSION: "true"
+      RELEX_HERO_ROWS: "home.continue"
+
+      # --- transport ---
+      REPLEX_REDIRECT_STREAMS: "true"
+      # Set REPLEX_REDIRECT_STREAMS_HOST only if streams must exit somewhere
+      # other than REPLEX_HOST.
+
+# ----------------------------------------------------------------------
+# Required environment variables (Portainer stack -> Environment variables):
+#
+#   REPLEX_HOST   = https://65-109-70-216.4415a7984eac4dd580d29c97add2d630.plex.direct:42442
+#   REPLEX_TOKEN  = <your admin plex token>
+#
+#   REPLEX_USER_RESOLUTION_POLICIES =
+#   [{"username":"jodiemy3","max_resolution":"1080","visible_collections":["🎀Jodie"]},
+#    {"username":"Luke.Mulvaney","max_resolution":"unlimited"}]
+#
+#   REPLEX_HIDDEN_COLLECTIONS = 🎀Jodie
+#
+# Optional:
+#   REPLEX_PORT = 8443 (host port binding)
+# ----------------------------------------------------------------------
+#
+# HTTPS note: some Plex clients refuse plain HTTP. For production, put this
+# container behind an HTTPS reverse proxy (Caddy/Traefik/NPM) with a real
+# hostname, e.g. replex.example.com, and use that as the Custom server
+# access URL. Alternatively enable Replex's built-in ACME support by adding:
+#
+#     RELEX_SSL_ENABLE: "true"
+#     RELEX_SSL_DOMAIN: replex.example.com
+#     ports: - "443:443"
+#
+# (built-in ACME needs port 443 reachable and the domain pointed here).
