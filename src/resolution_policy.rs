@@ -113,6 +113,38 @@ impl ResolutionPolicy {
     }
 }
 
+/// Resolve the policy for a verified identity.
+///
+/// Matching order: account uuid first (stable identifier), then username.
+/// Users with no matching entry receive the configured default. The identity
+/// must come from token verification; username headers on requests are never
+/// consulted here.
+pub fn resolve_policy(
+    policies: &[PolicyEntry],
+    default_limit: ResolutionLimit,
+    identity: &UserIdentity,
+) -> ResolutionPolicy {
+    let matched = policies
+        .iter()
+        .find(|p| p.uuid.as_deref() == Some(identity.uuid.as_str()))
+        .or_else(|| {
+            policies
+                .iter()
+                .find(|p| p.username.as_deref() == Some(identity.username.as_str()))
+        });
+
+    let limit = matched.map_or(default_limit, |p| p.max_resolution);
+
+    tracing::debug!(
+        username = %identity.username,
+        uuid = %identity.uuid,
+        ?limit,
+        "Resolution policy matched"
+    );
+
+    ResolutionPolicy { limit }
+}
+
 /// Classify a media version's resolution.
 ///
 /// Uses both the textual `videoResolution` attribute and the actual pixel
@@ -471,5 +503,90 @@ mod tests {
         assert_eq!(entries[1].max_resolution, ResolutionLimit::P2160);
         assert_eq!(entries[1].username, None);
         assert_eq!(entries[2].max_resolution, ResolutionLimit::Unlimited);
+    }
+
+    // --- policy resolution ---
+
+    fn identity(id: i64, uuid: &str, username: &str) -> UserIdentity {
+        UserIdentity {
+            id,
+            uuid: uuid.to_string(),
+            username: username.to_string(),
+        }
+    }
+
+    #[test]
+    fn resolve_policy_matches_uuid_first() {
+        let policies = vec![
+            PolicyEntry {
+                username: Some("jodie".to_string()),
+                uuid: None,
+                max_resolution: ResolutionLimit::P1080,
+            },
+            PolicyEntry {
+                username: Some("someone-else".to_string()),
+                uuid: Some("uuid-jodie".to_string()),
+                max_resolution: ResolutionLimit::P2160,
+            },
+        ];
+        let policy = resolve_policy(
+            &policies,
+            ResolutionLimit::Unlimited,
+            &identity(1, "uuid-jodie", "jodie"),
+        );
+        // uuid match wins over the username-only entry
+        assert_eq!(policy.limit, ResolutionLimit::P2160);
+    }
+
+    #[test]
+    fn resolve_policy_falls_back_to_username() {
+        let policies = vec![PolicyEntry {
+            username: Some("jodie".to_string()),
+            uuid: None,
+            max_resolution: ResolutionLimit::P1080,
+        }];
+        let policy = resolve_policy(
+            &policies,
+            ResolutionLimit::Unlimited,
+            &identity(1, "some-uuid", "jodie"),
+        );
+        assert_eq!(policy.limit, ResolutionLimit::P1080);
+    }
+
+    #[test]
+    fn resolve_policy_unmatched_uses_default() {
+        let policies = vec![PolicyEntry {
+            username: Some("jodie".to_string()),
+            uuid: None,
+            max_resolution: ResolutionLimit::P1080,
+        }];
+        let policy = resolve_policy(
+            &policies,
+            ResolutionLimit::Unlimited,
+            &identity(1, "other-uuid", "luke"),
+        );
+        assert_eq!(policy.limit, ResolutionLimit::Unlimited);
+    }
+
+    #[test]
+    fn resolve_policy_empty_policies_uses_default() {
+        let policy = resolve_policy(&[], ResolutionLimit::P1080, &identity(1, "u", "anyone"));
+        assert_eq!(policy.limit, ResolutionLimit::P1080);
+    }
+
+    #[test]
+    fn resolve_policy_case_sensitive_usernames() {
+        // Plex usernames are case sensitive; config must match exactly.
+        let policies = vec![PolicyEntry {
+            username: Some("Jodie".to_string()),
+            uuid: None,
+            max_resolution: ResolutionLimit::P1080,
+        }];
+        let policy = resolve_policy(
+            &policies,
+            ResolutionLimit::Unlimited,
+            &identity(1, "u", "jodie"),
+        );
+        assert_eq!(policy.limit, ResolutionLimit::Unlimited);
     }
 }

@@ -128,6 +128,22 @@ pub struct Config {
         deserialize_with = "figment::util::bool_from_str_or_int"
     )]
     pub strict_stream_guard: bool,
+    #[serde(default = "default_identity_cache_ttl")]
+    pub identity_cache_ttl: u64,
+    pub identity_api_base: Option<String>,
+}
+
+fn default_identity_cache_ttl() -> u64 {
+    60 * 60 // 60 minutes
+}
+
+impl Config {
+    /// Base URL for the Plex account identity API. Overridable for testing.
+    pub fn identity_api_base(&self) -> String {
+        self.identity_api_base
+            .clone()
+            .unwrap_or_else(|| "https://plex.tv".to_string())
+    }
 }
 
 fn deserialize_resolution_default<'de, D>(

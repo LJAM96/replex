@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::models::*;
+use crate::resolution_policy::UserIdentity;
 use crate::utils::*;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -42,6 +43,37 @@ static CACHE: Lazy<Cache<String, MediaContainerWrapper<MediaContainer>>> =
             })
             .build()
     });
+
+/// Verified Plex account identities keyed by token hash. Tokens themselves
+/// are never stored or logged.
+static IDENTITY_CACHE: Lazy<Cache<String, UserIdentity>> = Lazy::new(|| {
+    let c: Config = Config::figment().extract().unwrap();
+    Cache::builder()
+        .max_capacity(1000)
+        .time_to_live(Duration::from_secs(c.identity_cache_ttl))
+        .build()
+});
+
+/// Errors raised while resolving the authenticated Plex account.
+#[derive(Debug, thiserror::Error)]
+pub enum IdentityError {
+    /// The request token was rejected by plex.tv (401/403).
+    #[error("invalid or expired plex token")]
+    InvalidToken,
+    /// No token was present on the request.
+    #[error("no plex token on request")]
+    MissingToken,
+    /// plex.tv could not be reached or returned an unexpected response.
+    #[error("identity lookup failed: {0}")]
+    Upstream(#[from] anyhow::Error),
+}
+
+/// Hash a token for cache keying so raw tokens never sit in cache keys.
+fn hash_token(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(token.as_bytes());
+    data_encoding::HEXLOWER.encode(&digest)
+}
 
 struct Retry401;
 impl RetryableStrategy for Retry401 {
@@ -272,11 +304,113 @@ impl PlexClient {
     pub async fn get_item_by_key(
         self,
         key: String,
-    ) -> Result<MediaContainerWrapper<MediaContainer>> {
+        ) -> Result<MediaContainerWrapper<MediaContainer>> {
         let res = self.get(key).await.unwrap();
         let container: MediaContainerWrapper<MediaContainer> =
             from_reqwest_response(res).await.unwrap();
         Ok(container)
+    }
+
+    /// Resolve the authenticated Plex account for this client's request token.
+    ///
+    /// The token is verified against plex.tv; the resulting identity is the
+    /// only trusted basis for per-user policies. Results are cached by token
+    /// hash for `identity_cache_ttl` seconds. Authentication failures evict
+    /// any cached identity immediately.
+    pub async fn get_current_user(&self) -> Result<UserIdentity, IdentityError> {
+        let token = self
+            .context
+            .token
+            .clone()
+            .ok_or(IdentityError::MissingToken)?;
+
+        let cache_key = hash_token(&token);
+
+        if let Some(identity) = IDENTITY_CACHE.get(&cache_key).await {
+            tracing::debug!(
+                username = %identity.username,
+                uuid = %identity.uuid,
+                "Resolution identity resolved (cached)"
+            );
+            return Ok(identity);
+        }
+
+        let identity = self.fetch_current_user(&token).await?;
+
+        tracing::info!(
+            username = %identity.username,
+            uuid = %identity.uuid,
+            "Resolution identity resolved"
+        );
+
+        IDENTITY_CACHE.insert(cache_key, identity.clone()).await;
+
+        Ok(identity)
+    }
+
+    async fn fetch_current_user(&self, token: &str) -> Result<UserIdentity, IdentityError> {
+        let config: Config = Config::figment().extract().unwrap();
+        let base = config.identity_api_base();
+        let url = format!("{}/api/v2/user", base);
+
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            "X-Plex-Token",
+            header::HeaderValue::from_str(token)
+                .map_err(|e| IdentityError::Upstream(anyhow::anyhow!("bad token header: {e}")))?,
+        );
+        if let Some(cid) = &self.context.client_identifier {
+            if let Ok(v) = header::HeaderValue::from_str(cid) {
+                headers.insert("X-Plex-Client-Identifier", v);
+            }
+        }
+        headers.insert(ACCEPT, header::HeaderValue::from_static("application/json"));
+
+        let res = self
+            .http_client
+            .get(url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| IdentityError::Upstream(anyhow::anyhow!("plex.tv request failed: {e}")))?;
+
+        match res.status() {
+            salvo::http::StatusCode::OK => {}
+            salvo::http::StatusCode::UNAUTHORIZED | salvo::http::StatusCode::FORBIDDEN => {
+                return Err(IdentityError::InvalidToken)
+            }
+            status => {
+                return Err(IdentityError::Upstream(anyhow::anyhow!(
+                    "unexpected status from identity API: {status}"
+                )))
+            }
+        }
+
+        #[derive(Debug, serde::Deserialize)]
+        struct RawUser {
+            id: i64,
+            uuid: String,
+            #[serde(default)]
+            username: Option<String>,
+            #[serde(default)]
+            title: Option<String>,
+        }
+
+        let raw: RawUser = res
+            .json()
+            .await
+            .map_err(|e| IdentityError::Upstream(anyhow::anyhow!("identity response parse failed: {e}")))?;
+
+        let username = raw
+            .username
+            .or(raw.title)
+            .unwrap_or_else(|| format!("user-{}", raw.uuid));
+
+        Ok(UserIdentity {
+            id: raw.id,
+            uuid: raw.uuid,
+            username,
+        })
     }
 
     pub async fn get_cached(
