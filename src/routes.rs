@@ -819,6 +819,14 @@ pub async fn transform_req_content_directory(
     ctrl: &mut FlowCtrl,
 ) {
     let config: Config = Config::dynamic(req).extract().unwrap();
+
+    // Interleave disabled: pass requests through untouched so clients get
+    // native per-library hub responses.
+    if !config.interleave {
+        return;
+    }
+
+    let config: Config = Config::dynamic(req).extract().unwrap();
     let context: PlexContext = req.extract().await.unwrap();
     let plex_client = PlexClient::from_context(&context);
     let content_type = get_content_type_from_headers(req.headers_mut());

@@ -35,10 +35,10 @@ services:
         ${REPLEX_USER_RESOLUTION_POLICIES}
 
       # --- presentation / playback behaviour ---
-      RELEX_INTERLEAVE: "true"
-      RELEX_HUB_RESTRICTIONS: "true"
-      RELEX_AUTO_SELECT_VERSION: "true"
-      RELEX_HERO_ROWS: "home.continue"
+      REPLEX_INTERLEAVE: "true"
+      REPLEX_HUB_RESTRICTIONS: "true"
+      REPLEX_AUTO_SELECT_VERSION: "true"
+      REPLEX_HERO_ROWS: "home.continue"
 
       # --- transport ---
       REPLEX_REDIRECT_STREAMS: "true"
