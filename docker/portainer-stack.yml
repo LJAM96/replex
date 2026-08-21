@@ -14,9 +14,10 @@
 
 services:
   replex:
-    build:
-      context: https://github.com/LJAM96/replex.git#main
-      dockerfile: docker/Dockerfile
+    # Prebuilt multi-arch image published by GitHub Actions on every push to
+    # main (avoids Portainer's broken in-stack builds). "Update the stack"
+    # with "Re-pull image" enabled picks up new versions.
+    image: ghcr.io/ljam96/replex:latest
     container_name: replex
     restart: unless-stopped
     # No published ports: the only path in is through the tunnel.
