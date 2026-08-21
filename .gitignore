@@ -6,3 +6,8 @@
 .env
 # oversized/volatile full-library dumps are kept locally only
 tests/mock/out/baseline/library_sections_all.json
+
+# planning/AI working docs kept locally only
+resretrict.md
+implementation-plan.md
+phase0-checklist.md
