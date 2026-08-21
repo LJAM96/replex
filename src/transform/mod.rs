@@ -9,6 +9,7 @@ pub mod hub_section_directory;
 pub mod hub_style;
 pub mod library_interleave;
 pub mod restrictions;
+pub mod resolution_policy;
 
 pub use collection_style::CollectionStyleTransform;
 pub use hub_interleave::HubInterleaveTransform;
@@ -21,6 +22,7 @@ pub use hub_section_directory::HubSectionDirectoryTransform;
 pub use hub_style::{ClientHeroStyle, HubStyleTransform};
 pub use library_interleave::LibraryInterleaveTransform;
 pub use restrictions::HubRestrictionTransform;
+pub use resolution_policy::ResolutionPolicyTransform;
 
 use crate::{
     models::*,

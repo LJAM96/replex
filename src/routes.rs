@@ -7,18 +7,18 @@ use crate::transform::*;
 use crate::url::*;
 use crate::utils::*;
 use crate::webhooks;
+use http;
 use itertools::Itertools;
 use salvo::compression::Compression;
 use salvo::cors::Cors;
+use salvo::http::header;
 use salvo::http::header::CONTENT_TYPE;
+use salvo::http::HeaderValue;
 use salvo::http::{Request, Response, StatusCode};
 use salvo::prelude::*;
 use salvo::routing::PathFilter;
-use salvo::http::HeaderValue;
-use salvo::http::header;
 use tokio::time::Duration;
 use url::Url;
-use http;
 
 pub fn route() -> Router {
     let config: Config = Config::figment().extract().unwrap();
@@ -104,6 +104,35 @@ pub fn route() -> Router {
         .push(start_router)
         .push(subtitles_router);
 
+    // Per-user resolution policy: filter prohibited media versions from
+    // metadata responses. Registered before everything else so they win over
+    // the generic proxy paths below. When the feature flag is off these
+    // handlers leave responses untouched.
+    if config.resolution_policy_enabled {
+        router = router
+            .push(
+                Router::new()
+                    .path("/library/metadata/<**rest>")
+                    .hoop(proxy_for_transform)
+                    .get(transform_policy_response)
+                    .post(transform_policy_response),
+            )
+            .push(
+                Router::new()
+                    .path("/library/sections/<**rest>")
+                    .hoop(proxy_for_transform)
+                    .get(transform_policy_response),
+            )
+            .push(
+                Router::new()
+                    .path("/playQueues")
+                    .hoop(proxy_for_transform)
+                    .get(transform_policy_response)
+                    .post(transform_policy_response)
+                    .put(transform_policy_response),
+            );
+    }
+
     if config.disable_continue_watching {
         router = router.push(
             Router::new()
@@ -111,7 +140,7 @@ pub fn route() -> Router {
                 .get(empty_handler),
         );
     }
-    
+
     if config.ntf_watchlist_force {
         router = router.push(
             Router::new()
@@ -149,7 +178,7 @@ pub fn route() -> Router {
         .push(
             Router::new()
                 .path("/replex/image/hero/<type>/<uuid>")
-                .get(hero_image)
+                .get(hero_image),
         )
         .push(
             Router::new()
@@ -157,18 +186,10 @@ pub fn route() -> Router {
                 .hoop(transform_req_include_guids)
                 .hoop(transform_req_android)
                 .hoop(proxy_for_transform)
-                .get(transform_hubs_response)
+                .get(transform_hubs_response),
         )
-        .push(
-            Router::new()
-                .path("/replex/webhooks")
-                .post(webhook_plex),
-        )
-        .push(
-            Router::new()
-                .path("/ping")
-                .get(ping),
-        )
+        .push(Router::new().path("/replex/webhooks").post(webhook_plex))
+        .push(Router::new().path("/ping").get(ping))
         .push(
             Router::new()
                 .path("/replex/<style>/library/collections/<ids>/children")
@@ -221,7 +242,10 @@ async fn proxy_for_transform(
 ) -> Result<(), anyhow::Error> {
     let proxy = default_proxy();
     let headers_ori = req.headers().clone();
-    req.headers_mut().insert(http::header::ACCEPT, header::HeaderValue::from_static("application/json"));
+    req.headers_mut().insert(
+        http::header::ACCEPT,
+        header::HeaderValue::from_static("application/json"),
+    );
     proxy.handle(req, depot, res, ctrl).await;
     *req.headers_mut() = headers_ori;
     Ok(())
@@ -236,15 +260,15 @@ async fn should_skip(
     ctrl: &mut FlowCtrl,
 ) {
     let context: PlexContext = req.extract().await.unwrap();
-    
+
     let is_livetv = match context.path.clone() {
         Some(v) => v.contains("livetv"),
-        None => false
+        None => false,
     };
-    
+
     let is_plexamp = match context.product.clone() {
         Some(v) => v.to_lowercase().contains("plexamp"),
-        None => false
+        None => false,
     };
 
     if is_livetv || is_plexamp {
@@ -312,17 +336,13 @@ async fn fix_photo_transcode_request(
 
 // resolve a local media path to full url
 #[handler]
-async fn resolve_local_media_path(
-    req: &mut Request,
-    res: &mut Response,
-) {
+async fn resolve_local_media_path(req: &mut Request, res: &mut Response) {
     let mut context: PlexContext = req.extract().await.unwrap();
     let url = req.query::<String>("url");
-    if url.is_some() && url.clone().unwrap().contains("/replex/image/hero")
-    {
+    if url.is_some() && url.clone().unwrap().contains("/replex/image/hero") {
         let uri: url::Url = url::Url::parse(url.unwrap().as_str()).unwrap();
         let segments = uri.path_segments().unwrap().collect::<Vec<&str>>();
-        
+
         let uuid = segments.last().unwrap().replace(".jpg", "");
         //if context.token.is_none() {
         //    context.token = Some(segments.last().unwrap().to_string());
@@ -331,7 +351,7 @@ async fn resolve_local_media_path(
         let plex_client = PlexClient::from_context(&context);
         let rurl = plex_client.get_hero_art(uuid.to_string()).await;
         if rurl.is_some() {
-          add_query_param_salvo(req, "url".to_string(), rurl.unwrap());
+            add_query_param_salvo(req, "url".to_string(), rurl.unwrap());
         }
     }
 }
@@ -376,33 +396,29 @@ async fn ntf_watchlist_force(
             let url = format!("https://notifications.plex.tv/api/v1/notifications/settings?X-Plex-Token={}", &token);
             let json_data = r#"{"enabled": true,"libraries": [],"identifier": "tv.plex.notification.library.new"}"#;
             let client = reqwest::Client::new();
-        
+
             tracing::info!(
                 username = %context.clone().username.unwrap_or_default(),
                 platform = %context.clone().product.unwrap_or_default(),
                 platform = %context.clone().device_name.unwrap_or_default(),
                 "Bootstrao for request"
             );
-        
+
             let client_base = "https://clients.plex.tv";
             let res = client
-                    .get(format!("{}/api/v2/user", client_base))
-                    .header("Accept", "application/json")
-                    .header("X-Plex-Token", &token)
-                    .header("X-Plex-Client-Identifier", &client_id)
-                    .send()
-                    .await
-                    .unwrap();
-                    
-        
+                .get(format!("{}/api/v2/user", client_base))
+                .header("Accept", "application/json")
+                .header("X-Plex-Token", &token)
+                .header("X-Plex-Client-Identifier", &client_id)
+                .send()
+                .await
+                .unwrap();
+
             if !res.status().is_success() {
-              tracing::info!(
-                "cannot get user"
-              );
-              return;
+                tracing::info!("cannot get user");
+                return;
             }
-            
-            
+
             let user: PlexUser = res.json().await.unwrap();
             tracing::info!(
                 id = %user.id,
@@ -410,7 +426,7 @@ async fn ntf_watchlist_force(
                 username = %user.username,
                 "got user"
             );
-            
+
             let response = client
                 .post(url)
                 .header("Content-Type", "application/json")
@@ -418,20 +434,20 @@ async fn ntf_watchlist_force(
                 .send()
                 .await
                 .unwrap();
-        
+
             tracing::info!(
                 status = %response.status(),
                 "watchlist status"
             );
-            
-            let opts = vec![
-              "tv.plex.provider.vod",
-              "tv.plex.provider.music",
-            ];
-            
-            //let 
+
+            let opts = vec!["tv.plex.provider.vod", "tv.plex.provider.music"];
+
+            //let
             //return;
-            let u = format!("{}/api/v2/user/{}/settings/opt_outs", client_base, &user.uuid);
+            let u = format!(
+                "{}/api/v2/user/{}/settings/opt_outs",
+                client_base, &user.uuid
+            );
             for key in opts {
                 let response = client
                     .post(format!("{}?key={}&value=opt_out", u.clone(), key))
@@ -441,14 +457,12 @@ async fn ntf_watchlist_force(
                     .send()
                     .await
                     .unwrap();
-  
+
                 tracing::info!(
                 status = %response.status(),
                 "opt out status"
                 );
-              
             }
-            
         });
     }
 }
@@ -500,7 +514,7 @@ pub async fn hero_image(
     let url = plex_client.get_hero_art(uuid).await;
     if url.is_none() {
         res.status_code(StatusCode::NOT_FOUND);
-        return
+        return;
     }
     // let uri = url.unwrap().parse::<http::Uri>().unwrap();;
     // req.set_uri(uri);
@@ -531,35 +545,54 @@ pub async fn direct_stream_fallback(
     if direct_play != "1" {
         return Ok(());
     }
-    
+
     let mut res_upstream = &mut Response::new();
-    proxy_for_transform.handle(req, depot, res_upstream, ctrl).await;
+    proxy_for_transform
+        .handle(req, depot, res_upstream, ctrl)
+        .await;
 
     match res_upstream.status_code.unwrap() {
         http::StatusCode::OK => {
             let container: MediaContainerWrapper<MediaContainer> =
             //from_reqwest_response(upstream_res).await?;
             from_salvo_response(res_upstream).await?;
-    
+
             if container.media_container.general_decision_code.is_some()
-                && container.media_container.general_decision_code.unwrap() == 2000
+                && container.media_container.general_decision_code.unwrap()
+                    == 2000
             {
                 tracing::debug!(
                     "Direct play not avaiable, falling back to direct stream"
                 );
-                add_query_param_salvo(req, "directPlay".to_string(), "0".to_string());
-                add_query_param_salvo(req, "directStream".to_string(), "1".to_string());
+                add_query_param_salvo(
+                    req,
+                    "directPlay".to_string(),
+                    "0".to_string(),
+                );
+                add_query_param_salvo(
+                    req,
+                    "directStream".to_string(),
+                    "1".to_string(),
+                );
             };
             //return Ok(());
-        },
+        }
         http::StatusCode::BAD_REQUEST => {
             tracing::debug!(
                 "Got 400 bad request, falling back to direct stream"
             );
-            add_query_param_salvo(req, "directPlay".to_string(), "0".to_string());
-            add_query_param_salvo(req, "directStream".to_string(), "1".to_string());   
-            //return Ok(());   
-        },
+            add_query_param_salvo(
+                req,
+                "directPlay".to_string(),
+                "0".to_string(),
+            );
+            add_query_param_salvo(
+                req,
+                "directStream".to_string(),
+                "1".to_string(),
+            );
+            //return Ok(());
+        }
         status => {
             tracing::error!(status = ?status, res = ?res_upstream, "Failed to get plex response");
             return Err(
@@ -569,6 +602,53 @@ pub async fn direct_stream_fallback(
     };
     //res = &mut Response::new();
     return Ok(());
+}
+
+/// Filters metadata responses through the resolution policy.
+///
+/// Only runs when `resolution_policy_enabled` is set (the route itself is
+/// only registered then). Non-OK statuses and non-metadata payloads (images,
+/// binaries) pass through untouched.
+#[handler]
+pub async fn transform_policy_response(
+    req: &mut Request,
+    res: &mut Response,
+) -> Result<(), anyhow::Error> {
+    // Only successful metadata payloads are worth parsing.
+    let status = res.status_code.unwrap_or(StatusCode::OK);
+    if status != StatusCode::OK {
+        return Ok(());
+    }
+
+    let content_type = get_content_type_from_headers(req.headers_mut());
+
+    let parse_result = from_salvo_response(res).await;
+    let mut container: MediaContainerWrapper<MediaContainer> =
+        match parse_result {
+            Ok(c) => c,
+            Err(error) => {
+                // Binary/image/unparseable payload: body was consumed, so proxy
+                // semantics require an error rather than a truncated response.
+                tracing::warn!(
+                    error = ?error,
+                    uri = ?req.uri(),
+                    "Policy transform could not parse response"
+                );
+                return Err(salvo::http::StatusError::bad_request().into());
+            }
+        };
+    container.content_type = content_type;
+
+    let context: PlexContext = req.extract().await.unwrap();
+    let plex_client = PlexClient::from_context(&context);
+
+    TransformBuilder::new(plex_client, context.clone())
+        .with_transform(ResolutionPolicyTransform)
+        .apply_to(&mut container)
+        .await;
+
+    res.render(container);
+    Ok(())
 }
 
 #[handler]
@@ -602,7 +682,7 @@ pub async fn transform_hubs_response(
 pub async fn transform_req_content_directory(
     req: &mut Request,
     res: &mut Response,
-    ctrl: &mut FlowCtrl
+    ctrl: &mut FlowCtrl,
 ) {
     let config: Config = Config::dynamic(req).extract().unwrap();
     let context: PlexContext = req.extract().await.unwrap();
@@ -655,13 +735,10 @@ pub async fn transform_req_include_guids(
 
 // some androids have trouble loading more for hero style. So load more at once
 #[handler]
-pub async fn transform_req_android(
-    req: &mut Request,
-    res: &mut Response,
-) {
+pub async fn transform_req_android(req: &mut Request, res: &mut Response) {
     let config: Config = Config::dynamic(req).extract().unwrap();
     let context: PlexContext = req.extract().await.unwrap();
-    
+
     let mut count = context.clone().count.unwrap_or(25);
     match context.platform.unwrap_or_default() {
         Platform::Android => count = 50,
@@ -674,7 +751,6 @@ pub async fn transform_req_android(
 
     add_query_param_salvo(req, "count".to_string(), count.to_string());
 }
-
 
 // rhis handles refresh of individual rows or paging and paging if it
 #[handler]
@@ -762,8 +838,7 @@ pub async fn default_transform(
     let mut url = Url::parse(req.uri_mut().to_string().as_str()).unwrap();
     url.set_path(&rest_path);
     req.set_uri(hyper::Uri::try_from(url.as_str()).unwrap());
-    
-    
+
     // patch, plex seems to pass wrong contentdirid, probaply cause we all load it inti the first
     let mut queries = req.queries().clone();
     queries.remove("contentDirectoryID");
@@ -842,8 +917,10 @@ async fn force_maximum_quality(req: &mut Request) -> Result<(), anyhow::Error> {
     let config: Config = Config::dynamic(req).extract().unwrap();
     let mut queries = req.queries().clone();
 
-    if queries.get("maxVideoBitrate").is_none() && queries.get("videoBitrate").is_none() {
-        return Ok(())
+    if queries.get("maxVideoBitrate").is_none()
+        && queries.get("videoBitrate").is_none()
+    {
+        return Ok(());
     }
 
     queries.remove("maxVideoBitrate");
@@ -1000,13 +1077,13 @@ async fn get_transcoding_for_request(
 ) -> Result<TranscodingStatus, anyhow::Error> {
     let context: PlexContext = req.extract().await.unwrap();
     let plex_client = PlexClient::from_context(&context);
-    
+
     let mut res = &mut Response::new();
     let mut depot = &mut Depot::new();
     let mut ctrl = &mut FlowCtrl::new(vec![]);
     proxy_for_transform.handle(req, depot, res, ctrl).await;
     dbg!(&res);
-    
+
     let ress = plex_client.proxy_request(&req).await?;
     dbg!(&ress);
     //dbg!(&req);
@@ -1313,7 +1390,6 @@ async fn auto_select_version(req: &mut Request) {
 
                 queries.remove("subtitles");
                 queries.insert("subtitles".to_string(), "auto".to_string());
-
             }
         }
     }

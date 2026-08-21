@@ -1134,18 +1134,18 @@ pub struct MetaData {
     pub meta: Option<Meta>,
     #[serde(rename = "Metadata", default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[yaserde(rename = "Metadata")]
+    #[yaserde(rename = "Metadata", default, child)]
     pub metadata: Vec<MetaData>,
     #[serde(
         rename = "Directory",
         default,
         skip_serializing_if = "Vec::is_empty"
     )]
-    #[yaserde(rename = "Directory")]
+    #[yaserde(rename = "Directory", default, child)]
     pub directory: Vec<MetaData>, // only avaiable in XML
     #[serde(rename = "Video", default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[yaserde(rename = "Video")]
+    #[yaserde(rename = "Video", default, child)]
     pub video: Vec<MetaData>, // again only xml, but its the same as directory and metadata
     #[yaserde(attribute, rename = "childCount")]
     #[serde(
@@ -1459,19 +1459,19 @@ pub struct MediaContainer {
     pub library_section_uuid: Option<String>,
     #[serde(rename = "Hub", default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[yaserde(rename = "Hub")]
+    #[yaserde(rename = "Hub", default, child)]
     pub hub: Vec<MetaData>,
     #[serde(rename = "Metadata", default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[yaserde(rename = "Metadata")]
+    #[yaserde(rename = "Metadata", default, child)]
     pub metadata: Vec<MetaData>,
     #[serde(rename = "Video", default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[yaserde(rename = "Video")]
+    #[yaserde(rename = "Video", default, child)]
     pub video: Vec<MetaData>, // again only xml, but its the same as directory and metadata
     #[serde(rename = "Directory", default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[yaserde(rename = "Directory")]
+    #[yaserde(rename = "Directory", default, child)]
     pub directory: Vec<MetaData>,
     #[yaserde(attribute)]
     #[yaserde(rename = "playQueueID")]
