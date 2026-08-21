@@ -53,6 +53,29 @@ services:
     depends_on:
       - replex
 
+  # Your Plex server takes 45-60s to build merged home/library payloads for
+  # large libraries. This sidecar quietly refreshes Replex's cache every
+  # 25 minutes so human clients are always served the fast cached copy.
+  cache-warmer:
+    image: curlimages/curl:latest
+    container_name: replex-warmer
+    restart: unless-stopped
+    depends_on:
+      - replex
+    entrypoint: >
+      sh -c '
+      sleep 30;
+      while true; do
+        curl -sf -m 180 -H "Accept: application/json" -H "X-Plex-Token: $$REPLEX_TOKEN"
+          "http://replex:80/hubs/promoted?pinnedContentDirectoryID=23%2C22&count=20" > /dev/null;
+        curl -sf -m 180 -H "Accept: application/json" -H "X-Plex-Token: $$REPLEX_TOKEN"
+          "http://replex:80/hubs/continueWatching?contentDirectoryID=23%2C22" > /dev/null;
+        echo "$(date) cache warmed";
+        sleep 1500;
+      done'
+    environment:
+      REPLEX_TOKEN: ${REPLEX_TOKEN}
+
 # ----------------------------------------------------------------------
 # Required environment variables (Portainer stack -> Environment variables):
 #
