@@ -2,6 +2,9 @@ use crate::config::Config;
 use crate::logging::*;
 use crate::models::*;
 use crate::plex_client::*;
+use crate::resolution_policy::{
+    allowed_media, best_allowed_media, media_allowed, resolve_policy,
+};
 use crate::timeout::*;
 use crate::transform::*;
 use crate::url::*;
@@ -78,6 +81,14 @@ pub fn route() -> Router {
     let mut subtitles_router = Router::new()
         .path("/video/<colon:colon>/transcode/universal/subtitles")
         .goal(proxy_request);
+
+    // Per-user resolution policy must run before any other version
+    // selection logic so every downstream decision sees an allowed list.
+    if config.resolution_policy_enabled {
+        decision_router = decision_router.hoop(enforce_resolution_policy);
+        start_router = start_router.hoop(enforce_resolution_policy);
+        subtitles_router = subtitles_router.hoop(enforce_resolution_policy);
+    }
 
     // should go before force_maximum_quality and video_transcode_fallback
     if config.auto_select_version {
@@ -1206,6 +1217,40 @@ async fn video_transcode_fallback(
 
             let mut media_items =
                 item.media_container.metadata[0].media.clone();
+
+            // Policy: a restricted account must never fall back across its
+            // limit, so candidates are filtered to permitted versions first.
+            if config.resolution_policy_enabled {
+                match plex_client.get_current_user().await {
+                    Ok(identity) => {
+                        let policy = resolve_policy(
+                            &config.user_resolution_policies,
+                            config.resolution_default,
+                            &identity,
+                        );
+                        if !policy.is_unrestricted() {
+                            let before = media_items.len();
+                            media_items = allowed_media(&media_items, &policy);
+                            tracing::debug!(
+                                username = %identity.username,
+                                before = before,
+                                after = media_items.len(),
+                                "Transcode fallback candidates filtered by resolution policy"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        if config.resolution_policy_fail_closed {
+                            tracing::warn!(
+                                error = %error,
+                                "Identity unavailable, clearing transcode fallback candidates"
+                            );
+                            media_items.clear();
+                        }
+                    }
+                }
+            }
+
             media_items.sort_by(|x, y| {
                 let current_density = x.height.unwrap() * x.width.unwrap();
                 let next_density = y.height.unwrap() * y.width.unwrap();
@@ -1310,6 +1355,153 @@ async fn video_transcode_fallback(
 
     // replace_query(queries, req);
     Ok(())
+}
+
+/// Enforce the authenticated account's resolution limit on playback requests.
+///
+/// Runs before every other version-selection hoop. For restricted accounts:
+/// - a prohibited explicit `mediaIndex` is rewritten to the best permitted
+///   version, so manual selection cannot bypass the policy
+/// - an absent `mediaIndex` is set explicitly to the best permitted version,
+///   which also keeps downstream auto selection inside the policy
+/// - if nothing is permitted the request is rejected with 403
+///
+/// Unrestricted accounts return immediately with no changes.
+#[handler]
+async fn enforce_resolution_policy(
+    req: &mut Request,
+    res: &mut Response,
+    ctrl: &mut FlowCtrl,
+) -> Result<(), anyhow::Error> {
+    let config: Config = Config::dynamic(req).extract().unwrap();
+    if !config.resolution_policy_enabled {
+        return Ok(());
+    }
+
+    let context: PlexContext = req.extract().await.unwrap();
+    let plex_client = PlexClient::from_context(&context);
+
+    let identity = match plex_client.get_current_user().await {
+        Ok(identity) => identity,
+        Err(error) => {
+            if config.resolution_policy_fail_closed {
+                tracing::warn!(
+                    error = %error,
+                    "Identity unavailable, failing closed on playback request"
+                );
+                res.status_code(StatusCode::SERVICE_UNAVAILABLE);
+                ctrl.skip_rest();
+                return Ok(());
+            }
+            tracing::warn!(
+                error = %error,
+                "Identity unavailable, failing open on playback request"
+            );
+            return Ok(());
+        }
+    };
+
+    let policy = resolve_policy(
+        &config.user_resolution_policies,
+        config.resolution_default,
+        &identity,
+    );
+    if policy.is_unrestricted() {
+        return Ok(());
+    }
+
+    let mut queries = req.queries().clone();
+    let path = match queries.get("path") {
+        Some(path) => path.to_string(),
+        None => return Ok(()),
+    };
+
+    let item = match plex_client.get_item_by_key(path).await {
+        Ok(item) => item,
+        Err(error) => {
+            tracing::warn!(error = ?error, "Could not load item for resolution policy");
+            if config.resolution_policy_fail_closed {
+                res.status_code(StatusCode::SERVICE_UNAVAILABLE);
+                ctrl.skip_rest();
+                return Ok(());
+            }
+            return Ok(());
+        }
+    };
+
+    let media = &item.media_container.metadata[0].media;
+    if media.is_empty() {
+        return Ok(());
+    }
+
+    let screen_resolution = context
+        .screen_resolution
+        .get(0)
+        .map(|r| (r.width as i64, r.height as i64));
+
+    let requested_index: Option<usize> = queries
+        .get("mediaIndex")
+        .filter(|v| *v != "-1")
+        .and_then(|v| v.parse::<usize>().ok());
+
+    match requested_index {
+        Some(index) => {
+            let allowed = media
+                .get(index)
+                .map(|m| media_allowed(m, &policy))
+                .unwrap_or(false);
+            if allowed {
+                tracing::debug!(
+                    username = %identity.username,
+                    media_index = index,
+                    "Requested version within policy"
+                );
+                return Ok(());
+            }
+            tracing::info!(
+                username = %identity.username,
+                requested = index,
+                maximum = ?policy.limit,
+                "Blocked media version"
+            );
+        }
+        None => {
+            tracing::debug!(
+                username = %identity.username,
+                maximum = ?policy.limit,
+                "Selecting version within policy"
+            );
+        }
+    }
+
+    // Either the requested version was prohibited or none was requested:
+    // pick the best permitted one and pin it explicitly.
+    match best_allowed_media(media, &policy, screen_resolution) {
+        Some(best) => {
+            let best_index =
+                media.iter().position(|m| m.id == best.id).unwrap();
+            tracing::info!(
+                username = %identity.username,
+                replacement = best_index,
+                maximum = ?policy.limit,
+                "Rewriting mediaIndex to permitted version"
+            );
+            queries.remove("mediaIndex");
+            queries.insert("mediaIndex".to_string(), best_index.to_string());
+            replace_query(queries, req);
+            Ok(())
+        }
+        None => {
+            tracing::info!(
+                username = %identity.username,
+                maximum = ?policy.limit,
+                "No permitted version exists, rejecting playback"
+            );
+            res.status_code(StatusCode::FORBIDDEN);
+            ctrl.skip_rest();
+            Ok(())
+        }
+    }
 }
 
 /// When multiple qualities are avaiable, select the most relevant one.

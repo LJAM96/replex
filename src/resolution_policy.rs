@@ -60,7 +60,16 @@ pub fn deserialize_user_resolution_policies<'de, D>(
 where
     D: Deserializer<'de>,
 {
-    let raw = Vec::<RawPolicyEntry>::deserialize(deserializer)?;
+    // Environment variables arrive as plain strings (figment does not parse
+    // JSON in env values), while file-based config provides real sequences.
+    // Accept both.
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let raw: Vec<RawPolicyEntry> = match value {
+        serde_json::Value::String(s) => serde_json::from_str(&s)
+            .map_err(serde::de::Error::custom)?,
+        v => serde_json::from_value(v).map_err(serde::de::Error::custom)?,
+    };
+
     let mut out = Vec::with_capacity(raw.len());
     for entry in raw {
         if entry.username.is_none() && entry.uuid.is_none() {
