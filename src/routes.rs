@@ -841,6 +841,38 @@ pub async fn cached_hubs_response(
                         tracing::warn!(error = %e, path = %key_path, "upstream hub fetch failed");
                         salvo::http::StatusError::bad_gateway()
                     })?;
+
+                // Recent Plex Media Server versions removed /hubs/home
+                // (upstream 404). Serve the promoted payload instead so
+                // legacy clients keep a working home screen. Servers that
+                // still provide /hubs/home are unaffected: the fallback only
+                // triggers on a 404.
+                let r = if r.status() == reqwest::StatusCode::NOT_FOUND
+                    && key_path.starts_with("/hubs/home")
+                {
+                    let fallback_path =
+                        key_path.replacen("/hubs/home", "/hubs/promoted", 1);
+                    tracing::info!(
+                        path = %key_path,
+                        fallback = %fallback_path,
+                        "upstream /hubs/home unavailable, serving promoted hubs"
+                    );
+                    plex_client
+                        .clone()
+                        .get(fallback_path)
+                        .await
+                        .map_err(|e| {
+                            tracing::warn!(
+                                error = %e,
+                                path = %key_path,
+                                "promoted fallback fetch failed"
+                            );
+                            salvo::http::StatusError::bad_gateway()
+                        })?
+                } else {
+                    r
+                };
+
                 if r.status() != reqwest::StatusCode::OK {
                     tracing::warn!(status = %r.status(), path = %key_path, "upstream hub fetch non-200");
                     return Err(salvo::http::StatusError::bad_gateway().into());
