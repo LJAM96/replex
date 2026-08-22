@@ -136,6 +136,11 @@ pub struct Config {
         deserialize_with = "figment::util::bool_from_str_or_int"
     )]
     pub allow_username_fallback: bool,
+    /// Deterministic clientIdentifier -> username bindings for clients whose
+    /// tokens are opaque to plex.tv (PMS-scoped session tokens on some TV
+    /// platforms). JSON object: {"client-id": "username", ...}
+    #[serde(default, deserialize_with = "deserialize_client_identity_map")]
+    pub client_identity_map: std::collections::HashMap<String, String>,
     #[serde(default = "default_identity_cache_ttl")]
     pub identity_cache_ttl: u64,
     pub identity_api_base: Option<String>,
@@ -154,6 +159,21 @@ impl Config {
         self.identity_api_base
             .clone()
             .unwrap_or_else(|| "https://plex.tv".to_string())
+    }
+}
+
+
+fn deserialize_client_identity_map<'de, D>(
+    deserializer: D,
+) -> Result<std::collections::HashMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(s) if s.trim().is_empty() => Ok(Default::default()),
+        serde_json::Value::String(s) => serde_json::from_str(&s).map_err(serde::de::Error::custom),
+        v => serde_json::from_value(v).map_err(serde::de::Error::custom),
     }
 }
 

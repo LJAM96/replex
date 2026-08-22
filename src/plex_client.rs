@@ -459,6 +459,25 @@ impl PlexClient {
                         });
                     }
                 }
+                // Deterministic per-device binding: some TV clients use
+                // PMS-scoped session tokens invisible to every plex.tv
+                // endpoint. An admin-configured clientIdentifier -> username
+                // map is the only reliable identity source for them.
+                let config: Config = Config::figment().extract().unwrap();
+                if let Some(cid) = &self.context.client_identifier {
+                    if let Some(username) = config.client_identity_map.get(cid) {
+                        tracing::warn!(
+                            username = %username,
+                            client_id = %cid,
+                            "Identity resolved via client identity map"
+                        );
+                        return Ok(UserIdentity {
+                            id: 0,
+                            uuid: format!("cid-{cid}"),
+                            username: username.clone(),
+                        });
+                    }
+                }
                 return Err(IdentityError::InvalidToken);
             }
             status => {
