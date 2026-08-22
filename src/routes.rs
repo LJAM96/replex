@@ -1898,7 +1898,6 @@ mod tests {
     use rstest::rstest;
     use salvo::prelude::*;
     use salvo::test::{ResponseExt, TestClient};
-    use std::env;
 
     #[rstest]
     #[case::hubs_sections(
@@ -1908,18 +1907,26 @@ mod tests {
     #[case::hubs_promoted(
         format!("{}?contentDirectoryID=6&pinnedContentDirectoryID=6,7", PLEX_HUBS_PROMOTED), "tests/mock/out/hubs_promoted_6.json")
     ]
+    #[case::hubs_home_fallback(
+        "/hubs/home?count=12",
+        "tests/mock/out/hubs_home_fallback.json"
+    )]
     #[tokio::test]
     async fn test_routes(#[case] path: String, #[case] expected_path: String) {
+        let _ = tracing_subscriber::fmt::try_init();
         let mock_server = get_mock_server();
-        env::set_var(
-            "REPLEX_HOST",
-            format!("http://{}", mock_server.address().to_string()),
-        );
+        // Hold the env lock and reset config for the whole test so sibling
+        // tests mutating REPLEX_* vars can't race this request.
+        let _env = crate::test_helpers::pin_default_env(mock_server.address().to_string().as_str());
 
         let service = Service::new(super::route());
 
+        // Config::dynamic() unwraps the HOST header, so the test client must
+        // send one like a real request would. `path` already starts with a
+        // slash, so no separator is added here.
         let content =
-            TestClient::get(format!("http://127.0.0.1:5800/{}", &path))
+            TestClient::get(format!("http://127.0.0.1:5800{}", &path))
+                .add_header("HOST", &mock_server.address().to_string(), true)
                 .add_header("X-Plex-Token", "fakeID", true)
                 .add_header("X-Plex-Client-Identifier", "fakeID", true)
                 .add_header("Accept", "application/json", true)
@@ -1928,26 +1935,44 @@ mod tests {
                 .take_string()
                 .await
                 .unwrap();
-        assert_eq!(content, "Hello world!");
+
+        // Compare as parsed JSON so formatting differences don't matter.
+        // Run with BLESS=1 to overwrite the golden file with the current
+        // response after reviewing the diff.
+        let actual: serde_json::Value = serde_json::from_str(&content)
+            .unwrap_or_else(|e| {
+                panic!("response is not valid JSON ({e}): {content}")
+            });
+        if std::env::var("BLESS").as_deref() == Ok("1") {
+            std::fs::write(
+                &expected_path,
+                serde_json::to_string_pretty(&actual).unwrap(),
+            )
+            .unwrap();
+            return;
+        }
+        let expected: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(expected_path).unwrap())
+                .unwrap();
+        assert_eq!(actual, expected);
     }
 
     #[tokio::test]
-    async fn test_hello_world() {
+    async fn test_ping() {
+        let _ = tracing_subscriber::fmt::try_init();
         let mock_server = get_mock_server();
-        env::set_var(
-            "REPLEX_HOST",
-            format!("http://{}", mock_server.address().to_string()),
-        );
+        let _env = crate::test_helpers::pin_default_env(mock_server.address().to_string().as_str());
 
         let service = Service::new(super::route());
 
         let content =
-            TestClient::get(format!("http://127.0.0.1:5800/{}", "hello"))
+            TestClient::get(format!("http://127.0.0.1:5800/{}", "ping"))
+                .add_header("HOST", "127.0.0.1:5800", true)
                 .send((&service))
                 .await
                 .take_string()
                 .await
                 .unwrap();
-        assert_eq!(content, "Hello world!");
+        assert_eq!(content, "pong!");
     }
 }

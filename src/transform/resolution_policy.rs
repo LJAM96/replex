@@ -270,10 +270,13 @@ mod tests {
         serde_json::from_str::<MetaData>(&json).unwrap()
     }
 
-    // These scenarios mutate process-wide env vars, so they must run in one
-    // sequential test to avoid racing sibling tests.
+    // These scenarios mutate process-wide env vars, so they run under the
+    // shared env lock (same one the route tests hold) to avoid racing
+    // sibling tests that read REPLEX_* config.
     #[tokio::test]
     async fn policy_flag_and_fail_closed_scenarios() {
+        let _env = crate::test_helpers::env_lock();
+
         // With the feature disabled the policy resolves unrestricted even
         // though identity lookup would fail; no plex client needed because
         // we short-circuit before touching it.
