@@ -97,6 +97,23 @@ Settings are set via [environment variables](https://kinsta.com/knowledgebase/wh
 | REPLEX_REDIRECT_STREAMS  | false    | Redirect streams to another endpoint.                                      |
 | REPLEX_REDIRECT_STREAMS_HOST  | REPLEX_HOST    | Alternative streams endpoint                                         |
 | REPLEX_CACHE_TTL          | 1800    	 | Time to live for general caches in seconds. Set to 0 to disable (higly recommended to keep enabled besides testing purposes).  |
+| REPLEX_HUB_STALE_TTL      | 300    	 | Hub payloads older than this (seconds) are served instantly while being refreshed in the background, so clients never wait on a slow upstream fetch. Playback changes seen through the proxy (scrobbles, playback stopping) mark all hubs stale immediately, keeping Continue Watching fresh within seconds. Set to 0 to disable the staleness layer.  |
+
+## Hub caching and freshness
+
+Hubs are served from a shared cache that all users read from. Responses are
+always instant: when a cached payload is past `REPLEX_HUB_STALE_TTL` it is
+still served while a background refresh updates it for the next request.
+When a client reports playback changes through the proxy (`/:/scrobble`,
+`/:/timeline` with state=stopped), all hub payloads are marked stale so the
+next request refreshes them — this keeps Continue Watching and On Deck
+accurate within seconds without ever blocking a client on the upstream
+Plex server, which can take many seconds (or worse) to regenerate promoted
+hubs.
+
+Optionally, if the server owner has Plex Pass, adding `http://<replex>/replex/webhooks`
+to the Plex webhooks settings marks the cache stale on Plex events too
+(useful for changes made outside the proxy; requires a publicly reachable URL).
 
 ## Per-user resolution restrictions
 

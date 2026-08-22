@@ -33,6 +33,11 @@ pub struct Config {
     pub exclude_watched: bool,
     #[serde(default = "default_cache_ttl")]
     pub cache_ttl: u64,
+    /// Hub payloads older than this are served stale while a background
+    /// refresh runs. Playback changes observed through the proxy mark all
+    /// hubs stale immediately. 0 disables the staleness layer.
+    #[serde(default = "default_hub_stale_ttl")]
+    pub hub_stale_ttl: u64,
     #[serde(
         default = "default_as_true",
         deserialize_with = "figment::util::bool_from_str_or_int"
@@ -196,6 +201,10 @@ where
 
 fn default_cache_ttl() -> u64 {
     30 * 60 // 30 minutes
+}
+
+fn default_hub_stale_ttl() -> u64 {
+    5 * 60 // 5 minutes
 }
 
 pub(crate) fn deserialize_host<'de, D>(
