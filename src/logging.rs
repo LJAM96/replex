@@ -44,6 +44,15 @@ impl Handler for Logger {
             tracing::debug!(
                 status = %status,
                 path = %req.uri().path(),
+                platform = req.headers().get("X-Plex-Platform")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("-"),
+                product = req.headers().get("X-Plex-Product")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("-"),
+                client_id = req.headers().get("X-Plex-Client-Identifier")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("-"),
                 duration = ?duration,
                 "Response"
             );
