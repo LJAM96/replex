@@ -887,6 +887,8 @@ pub async fn cached_hubs_response(
 
     container.content_type = content_type;
 
+    let hubs_before = container.media_container.children().len();
+
     TransformBuilder::new(plex_client, context.clone())
         .with_transform(CollectionVisibilityTransform)
         .with_transform(HubRestrictionTransform)
@@ -897,6 +899,14 @@ pub async fn cached_hubs_response(
         .with_transform(HubKeyTransform)
         .apply_to(&mut container)
         .await;
+
+    tracing::debug!(
+        uri = %req.uri(),
+        path = %key_path,
+        hubs_before,
+        hubs_after = container.media_container.children().len(),
+        "hub payload transformed"
+    );
 
     res.render(container);
     Ok(())
@@ -964,16 +974,31 @@ pub async fn transform_req_content_directory(
             Platform::Ios | Platform::Android | Platform::TvOS
         );
 
-        let is_first = context
-            .clone()
-            .content_directory_id
-            .as_ref()
-            .map(|c| c[0] == pinned[0])
-            .unwrap_or(true); // absent → traiter comme premier directory
+        let is_first = match context.clone().content_directory_id.as_deref() {
+            // Aggregate request covering every pinned directory (modern web
+            // clients send one combined call): always serve the full merge.
+            Some(c) if c.len() > 1 => true,
+            // Legacy clients page through one slot at a time; only the first
+            // pinned slot carries the merged payload.
+            Some(c) => c[0] == pinned[0],
+            // Absent → treat as first directory.
+            None => true,
+        };
+
+        tracing::debug!(
+            uri = %req.uri(),
+            is_first,
+            mobile_client,
+            "promoted slot decision"
+        );
 
         if !is_first && !mobile_client {
             // Not the first directory: return empty container so only the
             // first slot triggers a full merged fetch.
+            tracing::debug!(
+                uri = %req.uri(),
+                "promoted non-first slot, serving intentional empty"
+            );
             let mut container: MediaContainerWrapper<MediaContainer> =
                 MediaContainerWrapper::default();
             container.content_type = content_type.clone();
