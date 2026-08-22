@@ -237,6 +237,17 @@ async fn proxy_request(
     depot: &mut Depot,
     ctrl: &mut FlowCtrl,
 ) {
+    // Playback changes flowing through the proxy (scrobbles, playback
+    // stopping) affect what hubs display. Mark all hub payloads stale so
+    // the next request serves instantly while refreshing in the background.
+    if crate::hub_cache::is_playback_invalidation(req.uri().path(), req.uri().query())
+    {
+        crate::hub_cache::mark_all_hubs_stale();
+        tracing::debug!(
+            path = %req.uri().path(),
+            "playback change observed, hub cache marked stale"
+        );
+    }
     let proxy = default_proxy();
     proxy.handle(req, depot, res, ctrl).await;
 }
@@ -616,15 +627,25 @@ pub async fn webhook_plex(
     req: &mut Request,
     res: &mut Response,
 ) -> Result<(), anyhow::Error> {
-    dbg!("YOOO");
-    let raw = req.form::<String>("payload").await;
-    let payload: webhooks::Payload = serde_json::from_str(&raw.unwrap())?;
-    dbg!(&req);
-    dbg!(payload);
-
-    // watchlist();
+    let raw = req.form::<String>("payload").await.unwrap_or_default();
+    match serde_json::from_str::<webhooks::Payload>(&raw) {
+        Ok(payload) => {
+            // Optional complement to proxy-side invalidation: catches changes
+            // made outside the proxy. Requires the server owner's Plex Pass
+            // and a publicly reachable webhook URL; harmless when unused.
+            if payload.event.starts_with("media.") {
+                crate::hub_cache::mark_all_hubs_stale();
+                tracing::debug!(
+                    event = %payload.event,
+                    account = %payload.account.title,
+                    "webhook marked hub cache stale"
+                );
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "unparseable webhook payload"),
+    }
     res.render(());
-    return Ok(());
+    Ok(())
 }
 
 #[handler]
@@ -824,6 +845,7 @@ pub async fn cached_hubs_response(
     let content_type = get_content_type_from_headers(req.headers_mut());
 
     let key_path = cache_key_for_request(req);
+    let config: Config = Config::dynamic(req).extract().unwrap();
 
     // Shared raw-response cache: keyed WITHOUT the client token so the
     // warmer (admin token) and every user read/write the same entries.
@@ -831,59 +853,34 @@ pub async fn cached_hubs_response(
     let cache_key = format!("hubcache:{key_path}");
     let mut container: MediaContainerWrapper<MediaContainer> =
         match plex_client.cache.get(&cache_key).await {
-            Some(cached) => cached,
-            None => {
-                let r = plex_client
-                    .clone()
-                    .get(key_path.clone())
+            Some(mut cached) => {
+                // Stale-while-revalidate: serve immediately, refresh in the
+                // background so nobody waits on a slow upstream fetch.
+                if config.hub_stale_ttl > 0
+                    && crate::hub_cache::is_stale(
+                        &cache_key,
+                        Duration::from_secs(config.hub_stale_ttl),
+                    )
                     .await
-                    .map_err(|e| {
-                        tracing::warn!(error = %e, path = %key_path, "upstream hub fetch failed");
-                        salvo::http::StatusError::bad_gateway()
-                    })?;
-
-                // Recent Plex Media Server versions removed /hubs/home
-                // (upstream 404). Serve the promoted payload instead so
-                // legacy clients keep a working home screen. Servers that
-                // still provide /hubs/home are unaffected: the fallback only
-                // triggers on a 404.
-                let r = if r.status() == reqwest::StatusCode::NOT_FOUND
-                    && key_path.starts_with("/hubs/home")
                 {
-                    let fallback_path =
-                        key_path.replacen("/hubs/home", "/hubs/promoted", 1);
-                    tracing::info!(
+                    tracing::debug!(
                         path = %key_path,
-                        fallback = %fallback_path,
-                        "upstream /hubs/home unavailable, serving promoted hubs"
+                        "serving stale hubs, refreshing in background"
                     );
-                    plex_client
-                        .clone()
-                        .get(fallback_path)
-                        .await
-                        .map_err(|e| {
-                            tracing::warn!(
-                                error = %e,
-                                path = %key_path,
-                                "promoted fallback fetch failed"
-                            );
-                            salvo::http::StatusError::bad_gateway()
-                        })?
-                } else {
-                    r
-                };
-
-                if r.status() != reqwest::StatusCode::OK {
-                    tracing::warn!(status = %r.status(), path = %key_path, "upstream hub fetch non-200");
-                    return Err(salvo::http::StatusError::bad_gateway().into());
+                    crate::hub_cache::spawn_hub_refresh(
+                        plex_client.clone(),
+                        key_path.clone(),
+                        cache_key.clone(),
+                    );
                 }
-                let parsed = from_reqwest_response(r)
-                    .await
-                    .map_err(|e| {
-                        tracing::warn!(error = ?e, path = %key_path, "hub payload parse failed");
-                        salvo::http::StatusError::bad_gateway()
-                    })?;
+                cached
+            }
+            None => {
+                let parsed =
+                    crate::hub_cache::fetch_hubs_payload(&plex_client, &key_path)
+                        .await?;
                 plex_client.cache.insert(cache_key.clone(), parsed.clone()).await;
+                crate::hub_cache::track_fetched(cache_key.clone()).await;
                 parsed
             }
         };
@@ -1955,6 +1952,45 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(expected_path).unwrap())
                 .unwrap();
         assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn timeline_stop_marks_hubs_stale() {
+        let _ = tracing_subscriber::fmt::try_init();
+        let mock_server = get_mock_server();
+        let _env = crate::test_helpers::pin_default_env(&mock_server.address().to_string());
+
+        // A fresh age record must exist before the playback event.
+        crate::hub_cache::track_fetched("hubcache:/hubs/promoted".to_string()).await;
+        assert!(
+            !crate::hub_cache::is_stale(
+                "hubcache:/hubs/promoted",
+                Duration::from_secs(300)
+            )
+            .await
+        );
+
+        let service = Service::new(super::route());
+
+        // Proxied through the catch-all; the upstream 404 from the mock is
+        // irrelevant, the invalidation happens on the way through.
+        let _res = TestClient::post(format!(
+            "http://127.0.0.1:5800/:/timeline?state=stopped&ratingKey=1&key=/library/metadata/1"
+        ))
+        .add_header("HOST", &mock_server.address().to_string(), true)
+        .add_header("X-Plex-Token", "fakeID", true)
+        .add_header("X-Plex-Client-Identifier", "fakeID", true)
+        .send((&service))
+        .await;
+
+        assert!(
+            crate::hub_cache::is_stale(
+                "hubcache:/hubs/promoted",
+                Duration::from_secs(300)
+            )
+            .await,
+            "timeline stop observed through the proxy must mark hubs stale"
+        );
     }
 
     #[tokio::test]
