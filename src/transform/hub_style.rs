@@ -136,7 +136,10 @@ impl ClientHeroStyle {
 
    pub fn web() -> Self {
         Self {
-            include_meta: false,
+            // Plex Web's hero renderer requires the hub Meta block
+            // (displayFields/displayImages); without it the row silently
+            // degrades to a poster shelf.
+            include_meta: true,
             cover_art_as_art: true,
             cover_art_as_thumb: true,
             ..ClientHeroStyle::default()
