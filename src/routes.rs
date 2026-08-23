@@ -2067,7 +2067,25 @@ mod tests {
         let expected: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(expected_path).unwrap())
                 .unwrap();
-        assert_eq!(actual, expected);
+        // Hero transforms emit absolute image URLs that embed the upstream
+        // host:port; normalise ephemeral mock ports so comparisons are
+        // deterministic.
+        fn normalize(v: &serde_json::Value) -> serde_json::Value {
+            let re = regex::Regex::new(r"127\.0\.0\.1:\d+").unwrap();
+            match v {
+                serde_json::Value::String(s) => serde_json::Value::String(
+                    re.replace_all(s, "127.0.0.1:PORT").to_string(),
+                ),
+                serde_json::Value::Array(a) => {
+                    serde_json::Value::Array(a.iter().map(normalize).collect())
+                }
+                serde_json::Value::Object(o) => serde_json::Value::Object(
+                    o.iter().map(|(k, val)| (k.clone(), normalize(val))).collect(),
+                ),
+                other => other.clone(),
+            }
+        }
+        assert_eq!(normalize(&actual), normalize(&expected));
     }
 
     #[tokio::test]

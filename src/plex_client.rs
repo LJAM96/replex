@@ -436,6 +436,11 @@ impl PlexClient {
                 if let Some(identity) = self.resolve_shared_user(token).await? {
                     return Ok(identity);
                 }
+                // plex.tv rejects some device-scoped shared tokens outright;
+                // match the token against the admin's shared-server list.
+                if let Some(identity) = self.resolve_via_shared_servers(token).await? {
+                    return Ok(identity);
+                }
                 // Last resort for clients whose tokens are opaque to
                 // plex.tv (e.g. preview apps using PMS-scoped session
                 // tokens): trust the X-Plex-Username header. Opt-in only,
@@ -625,6 +630,99 @@ impl PlexClient {
 
         // Token is valid but has no access to THIS server: not one of ours.
         Ok(None)
+    }
+
+    /// Resolve a shared user by matching the request token against the
+    /// admin's shared-server access token list on plex.tv.
+    ///
+    /// Some shared-user tokens are device/session-scoped and rejected by
+    /// every plex.tv /api/v2 endpoint, even though the media server itself
+    /// accepts them. The admin view (`/api/servers/{id}/shared_servers`,
+    /// authed with REPLEX_TOKEN) lists every outstanding shared accessToken
+    /// with its username, giving a deterministic identity source that does
+    /// not depend on plex.tv accepting the requestor's token.
+    async fn resolve_via_shared_servers(
+        &self,
+        token: &str,
+    ) -> Result<Option<UserIdentity>, IdentityError> {
+        let config: Config = Config::figment().extract().unwrap();
+        let Some(admin_token) = config.token.clone() else {
+            tracing::debug!("shared-servers lookup skipped: no admin token configured");
+            return Ok(None);
+        };
+        let machine_id = self.server_machine_id().await?;
+
+        let base = config.identity_api_base();
+        let url = format!("{base}/api/servers/{machine_id}/shared_servers");
+        let res = self
+            .http_client
+            .get(&url)
+            .header("X-Plex-Token", admin_token)
+            .header("X-Plex-Client-Identifier", self.client_identifier_header())
+            .header(ACCEPT, "application/xml")
+            .send()
+            .await
+            .map_err(|e| {
+                IdentityError::Upstream(anyhow::anyhow!(
+                    "shared_servers request failed: {e}"
+                ))
+            })?;
+
+        if res.status() != salvo::http::StatusCode::OK {
+            tracing::warn!(
+                status = %res.status(),
+                "shared_servers lookup failed"
+            );
+            return Ok(None);
+        }
+
+        // The response is XML: <SharedServer username="..." accessToken="..." .../>
+        // Scan each entry and match on the access token.
+        let body = res.text().await.unwrap_or_default();
+        for tag in body.split("<SharedServer ").skip(1) {
+            let attrs = Self::parse_xml_attrs(tag.split('>').next().unwrap_or(""));
+            let entry_token = attrs.get("accessToken").map(|s| s.as_str());
+            if entry_token != Some(token) {
+                continue;
+            }
+            let Some(username) = attrs.get("username").filter(|u| !u.is_empty()) else {
+                continue;
+            };
+            tracing::info!(
+                username = %username,
+                "Shared-token identity resolved via admin shared_servers"
+            );
+            return Ok(Some(UserIdentity {
+                id: attrs
+                    .get("userID")
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(0),
+                uuid: format!("shared-{username}"),
+                username: username.clone(),
+            }));
+        }
+        Ok(None)
+    }
+
+    /// Extract key="value" pairs from an XML attribute string.
+    fn parse_xml_attrs(s: &str) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        let mut rest = s.trim();
+        while let Some(eq) = rest.find('=') {
+            let key = rest[..eq].trim().to_string();
+            let after = rest[eq + 1..].trim_start();
+            if !after.starts_with('"') {
+                break;
+            }
+            match after[1..].find('"') {
+                Some(end) => {
+                    map.insert(key, after[1..1 + end].to_string());
+                    rest = after[end + 2..].trim_start();
+                }
+                None => break,
+            }
+        }
+        map
     }
 
     /// plex.tv v2 endpoints reject requests without X-Plex-Client-Identifier.

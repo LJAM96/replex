@@ -2,11 +2,72 @@
   "MediaContainer": {
     "Hub": [
       {
+        "Meta": {
+          "DisplayFields": [
+            {
+              "fields": [
+                "title",
+                "originallyAvailableAt"
+              ],
+              "type": "movie"
+            },
+            {
+              "fields": [
+                "title",
+                "childCount"
+              ],
+              "type": "show"
+            },
+            {
+              "fields": [
+                "title",
+                "originallyAvailableAt"
+              ],
+              "type": "clip"
+            },
+            {
+              "fields": [
+                "title",
+                "originallyAvailableAt"
+              ],
+              "type": "mixed"
+            }
+          ],
+          "DisplayImage": [
+            {
+              "imageType": "coverArt",
+              "type": "hero"
+            },
+            {
+              "imageType": "coverArt",
+              "type": "mixed"
+            },
+            {
+              "imageType": "coverArt",
+              "type": "clip"
+            },
+            {
+              "imageType": "coverArt",
+              "type": "movie"
+            },
+            {
+              "imageType": "coverArt",
+              "type": "show"
+            }
+          ]
+        },
         "Metadata": [
           {
             "Director": [
               {
                 "tag": "Craig Mazin"
+              }
+            ],
+            "Image": [
+              {
+                "alt": "When You're Lost in the Darkness",
+                "type": "coverArt",
+                "url": "http://127.0.0.1:41589/replex/image/hero/episode/5e7218eb388dc2003e4495ac?X-Plex-Token=fakeID"
               }
             ],
             "Media": [
@@ -87,7 +148,7 @@
             "parentTitle": "Season 1",
             "ratingKey": "217469",
             "summary": "2003. As a parasitic fungal outbreak begins to ravage the country and the world, Joel Miller attempts to escape the escalating chaos with his daughter and brother. Twenty years later, a now hardened Joel and his partner Tess fight to survive under a totalitarian regime, while the insurgent Fireflies harbor a teenage girl with a unique gift.",
-            "thumb": "/library/metadata/217469/thumb/1676967988",
+            "thumb": "http://127.0.0.1:41589/replex/image/hero/episode/5e7218eb388dc2003e4495ac?X-Plex-Token=fakeID",
             "title": "When You're Lost in the Darkness",
             "type": "episode",
             "updatedAt": 1676967988,

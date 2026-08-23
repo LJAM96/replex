@@ -196,4 +196,46 @@ async fn identity_resolution_scenarios() {
     assert_eq!(identity.uuid, "shared-jodiemy3");
     assert_eq!(root_mock.hits(), 1);
     assert_eq!(shared_resources.hits(), 1);
+
+    // --- device-scoped shared tokens resolve via admin shared_servers ---
+    // Some shared tokens are rejected by every plex.tv /api/v2 endpoint
+    // even though the media server accepts them. The admin-authed
+    // shared_servers listing maps accessTokens to usernames.
+    let admin_token = "admin-token-value";
+    std::env::set_var("REPLEX_TOKEN", admin_token);
+
+    mock.mock(|when, then| {
+        when.method(GET)
+            .path("/api/v2/user")
+            .header("X-Plex-Token", "device-scoped-token");
+        then.status(401);
+    });
+    mock.mock(|when, then| {
+        when.method(GET)
+            .path("/api/v2/resources")
+            .header("X-Plex-Token", "device-scoped-token");
+        then.status(401);
+    });
+    mock.mock(|when, then| {
+        when.method(GET)
+            .path("/api/servers/test-machine/shared_servers")
+            .header("X-Plex-Token", admin_token);
+        then.status(200)
+            .header("content-type", "application/xml")
+            .body(
+                r#"<MediaContainer size="2">
+<SharedServer id="1" username="jodiemy3" userID="839319108" accessToken="other-user-token"/>
+<SharedServer id="2" username="Luke.Mulvaney" userID="567660830" accessToken="device-scoped-token"/>
+</MediaContainer>"#,
+            );
+    });
+
+    let client = client_for_host(Some("device-scoped-token"), &mock.base_url());
+    let identity = client.get_current_user().await.unwrap();
+    assert_eq!(identity.username, "Luke.Mulvaney");
+    assert_eq!(identity.uuid, "shared-Luke.Mulvaney");
+
+    // Second lookup must be served from the identity cache.
+    let cached = client.get_current_user().await.unwrap();
+    assert_eq!(cached, identity);
 }

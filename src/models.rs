@@ -1316,6 +1316,13 @@ impl MetaData {
         if !self.is_hub() {
             return Ok(false);
         }
+        // Modern PMS marks Continue Watching and similar rows as hero
+        // natively; honour that flag even when REPLEX_HERO_ROWS is unset,
+        // otherwise clients receive style=hero without the Meta block they
+        // need to actually render it.
+        if self.style.as_deref() == Some("hero") {
+            return Ok(true);
+        }
         let config: Config = Config::figment().extract().unwrap();
         // dbg!(&config.hero_rows);
         if config.hero_rows.is_some() && self.hub_identifier.is_some() {
