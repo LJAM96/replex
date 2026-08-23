@@ -200,8 +200,9 @@ pub(crate) fn is_playback_invalidation(path: &str, query: Option<&str>) -> bool 
 /// continue watching and the /hubs/home fallback.
 async fn warm_paths(host: &str, token: &str) -> Vec<String> {
     let sections_url = format!("{}/library/sections", host.trim_end_matches('/'));
+    tracing::debug!(url = %sections_url, "warmer listing sections");
     let resp = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(10))
         .build()
         .unwrap()
         .get(&sections_url)
@@ -210,7 +211,10 @@ async fn warm_paths(host: &str, token: &str) -> Vec<String> {
         .send()
         .await
     {
-        Ok(r) => r,
+        Ok(r) => {
+            tracing::debug!(status = %r.status(), "warmer sections response");
+            r
+        }
         Err(e) => {
             tracing::warn!(error = %e, "warmer could not list library sections");
             return vec![];
@@ -226,18 +230,23 @@ async fn warm_paths(host: &str, token: &str) -> Vec<String> {
         key: String,
     }
     let all = match resp.json::<crate::models::MediaContainerWrapper<Sections>>().await {
-        Ok(s) => s
-            .media_container
-            .directory
-            .into_iter()
-            .map(|d| d.key)
-            .collect::<Vec<_>>(),
+        Ok(s) => {
+            let dirs: Vec<String> = s
+                .media_container
+                .directory
+                .into_iter()
+                .map(|d| d.key)
+                .collect();
+            tracing::debug!(count = dirs.len(), "warmer parsed sections");
+            dirs
+        }
         Err(e) => {
             tracing::warn!(error = %e, "warmer could not parse library sections");
             return vec![];
         }
     };
     if all.is_empty() {
+        tracing::warn!("warmer found no library sections");
         return vec![];
     }
     let joined = all.join(",");
@@ -261,11 +270,13 @@ async fn warm_cycle() {
         return;
     }
     let Some(token) = config.token.clone() else {
+        tracing::debug!("warmer idle: no admin token configured");
         return; // no admin token configured, nothing to warm with
     };
     let Some(host) = config.host.clone() else {
         return;
     };
+    tracing::debug!("hub warmer cycle starting");
 
     let context = crate::models::PlexContext {
         token: Some(token.clone()),

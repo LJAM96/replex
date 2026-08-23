@@ -30,3 +30,18 @@ Design sketch:
 Related edge case noticed along the way: Plexamp/LiveTV requests bypass the
 normal hoop chain (`should_skip`), so their playback events don't trigger
 hub invalidation. Webhook integration covers this if configured.
+
+## Networking quirk: REPLEX_HOST must stay on the WAN path
+
+Plex Media Server on this VPS (docker, linuxserver image) treats
+loopback / docker-bridge / LAN-source connections as trusted-local and
+ignores X-Plex-Token for them: `/library/sections` and other library
+endpoints return an EMPTY container with no error. The tailscale IP
+path 401s instead. Only connections that arrive via the public IP
+DNAT hairpin (`http://65.109.70.216:42442`, ~90ms RTT) authenticate
+tokens through plex.tv correctly.
+
+Consequence: REPLEX_HOST must stay on the public-IP URL even though a
+local path would be ~90x faster per call. The hub cache, SWR and the
+background warmer exist to absorb that latency. If you ever see empty
+hubs right after changing REPLEX_HOST to a local address, this is why.
