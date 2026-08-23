@@ -9,7 +9,7 @@
 use crate::cache::{Expiration, GLOBAL_CACHE};
 use crate::config::Config;
 use salvo::http::header::{CACHE_CONTROL, CONTENT_TYPE};
-use salvo::http::{HeaderValue, ResBody, StatusCode};
+use salvo::http::{HeaderValue, HeaderName, ResBody, StatusCode};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -31,9 +31,25 @@ fn cache_policy_for(path: &str) -> &'static str {
         || path.ends_with("/index.html")
         || path.contains("/translations/");
     if volatile {
-        "no-cache, max-age=60"
+        "no-cache"
     } else {
         "public, max-age=31536000, immutable"
+    }
+}
+
+/// Plex Web's service worker can pin stale API responses and images,
+/// showing blank posters for anything not in its snapshot. Sending
+/// Clear-Site-Data on the app entrypoint makes browsers wipe storage for
+/// this origin once per load of index.html, after which the freshly
+/// installed worker starts clean.
+fn extra_headers_for(path: &str) -> Vec<(&'static str, HeaderValue)> {
+    if path.ends_with("/index.html") {
+        vec![(
+            "clear-site-data",
+            HeaderValue::from_static("\"cache\", \"storage\""),
+        )]
+    } else {
+        vec![]
     }
 }
 
@@ -109,5 +125,10 @@ pub async fn serve_web_asset(req: &mut Request, res: &mut Response) {
         CACHE_CONTROL,
         HeaderValue::from_static(cache_policy_for(&path)),
     );
+    for (name, value) in extra_headers_for(&path) {
+        if let Ok(v) = HeaderName::from_bytes(name.as_bytes()) {
+            res.headers_mut().insert(v, value);
+        }
+    }
     *res.body_mut() = ResBody::Once(bytes::Bytes::from(asset.body));
 }
