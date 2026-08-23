@@ -185,6 +185,143 @@ pub(crate) fn is_playback_invalidation(path: &str, query: Option<&str>) -> bool 
     false
 }
 
+// ---------------------------------------------------------------------------
+// Background warmer
+//
+// The first request after boot for a hub payload is a slow blocking upstream
+// fetch (observed 45s-2min for merged promoted payloads), and clients render
+// an empty home screen rather than wait. Warming the canonical keys with the
+// admin token on a timer keeps every client load on the fast cache/SWR path.
+// ---------------------------------------------------------------------------
+
+/// The canonical hub paths to keep warm, derived from the server's library
+/// sections. Mirrors what real clients request: one promoted key per section
+/// slot (web clients page through them individually), the aggregate slot,
+/// continue watching and the /hubs/home fallback.
+async fn warm_paths(host: &str, token: &str) -> Vec<String> {
+    let sections_url = format!("{}/library/sections", host.trim_end_matches('/'));
+    let resp = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap()
+        .get(&sections_url)
+        .header("Accept", "application/json")
+        .header("X-Plex-Token", token)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "warmer could not list library sections");
+            return vec![];
+        }
+    };
+    #[derive(serde::Deserialize)]
+    struct Sections {
+        #[serde(rename = "Directory", default)]
+        directory: Vec<Section>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Section {
+        key: String,
+    }
+    let all = match resp.json::<crate::models::MediaContainerWrapper<Sections>>().await {
+        Ok(s) => s
+            .media_container
+            .directory
+            .into_iter()
+            .map(|d| d.key)
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            tracing::warn!(error = %e, "warmer could not parse library sections");
+            return vec![];
+        }
+    };
+    if all.is_empty() {
+        return vec![];
+    }
+    let joined = all.join(",");
+    let mut paths = vec![
+        format!("/hubs/promoted?contentdirectoryid={joined}&pinnedcontentdirectoryid={joined}"),
+        "/hubs/home".to_string(),
+        format!("/hubs/continueWatching?contentdirectoryid={joined}"),
+    ];
+    for s in &all {
+        paths.push(format!(
+            "/hubs/promoted?contentdirectoryid={s}&pinnedcontentdirectoryid={joined}"
+        ));
+    }
+    paths
+}
+
+/// One warmer pass: fetch every canonical path that is missing or stale.
+async fn warm_cycle() {
+    let config: Config = Config::figment().extract().unwrap();
+    if config.warm_interval == 0 {
+        return;
+    }
+    let Some(token) = config.token.clone() else {
+        return; // no admin token configured, nothing to warm with
+    };
+    let Some(host) = config.host.clone() else {
+        return;
+    };
+
+    let context = crate::models::PlexContext {
+        token: Some(token.clone()),
+        client_identifier: Some("replex-warmer".to_string()),
+        ..Default::default()
+    };
+    let client = PlexClient::from_context(&context);
+
+    for path in warm_paths(&host, &token).await {
+        let fetch_path = if path.contains('?') {
+            format!("{}&includeGuids=1&count=50", path)
+        } else {
+            format!("{}?includeGuids=1&count=50", path)
+        };
+        // Compute the cache key with the exact same logic client requests
+        // go through, so warmer entries land where lookups land.
+        let cache_key = {
+            let mut probe = salvo::http::Request::default();
+            let uri: hyper::Uri = fetch_path.parse().expect("valid warm path");
+            probe.set_uri(uri);
+            format!("hubcache:{}", crate::routes::cache_key_for_request(&probe))
+        };
+        if !claim_refresh(&cache_key) {
+            continue;
+        }
+        match fetch_hubs_payload(&client, &fetch_path).await {
+            Ok(payload) => {
+                client.cache.insert(cache_key.clone(), payload).await;
+                track_fetched(cache_key.clone()).await;
+                tracing::debug!(path = %fetch_path, "warmed hub payload");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = %fetch_path, "warm fetch failed");
+            }
+        }
+        let mut inflight = REFRESH_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        inflight.remove(&cache_key);
+    }
+}
+
+/// Start the background warmer loop. Runs forever; call once at startup.
+pub fn spawn_warmer() {
+    tokio::spawn(async move {
+        // Give the server a moment to bind before spending upstream time.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        loop {
+            warm_cycle().await;
+            let interval: u64 = {
+                let c: Config = Config::figment().extract().unwrap();
+                c.warm_interval.max(1)
+            };
+            tokio::time::sleep(Duration::from_secs(interval)).await;
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

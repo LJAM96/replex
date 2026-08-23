@@ -97,6 +97,7 @@ Settings are set via [environment variables](https://kinsta.com/knowledgebase/wh
 | REPLEX_REDIRECT_STREAMS  | false    | Redirect streams to another endpoint.                                      |
 | REPLEX_REDIRECT_STREAMS_HOST  | REPLEX_HOST    | Alternative streams endpoint                                         |
 | REPLEX_CACHE_TTL          | 1800    	 | Time to live for general caches in seconds. Set to 0 to disable (higly recommended to keep enabled besides testing purposes).  |
+| REPLEX_WARM_INTERVAL      | 300    	 | Seconds between background warmer cycles that pre-fetch hot hub payloads with the admin token so clients never pay the slow cold fetch. 0 disables warming.  |
 | REPLEX_HUB_STALE_TTL      | 300    	 | Hub payloads older than this (seconds) are served instantly while being refreshed in the background, so clients never wait on a slow upstream fetch. Playback changes seen through the proxy (scrobbles, playback stopping) mark all hubs stale immediately, keeping Continue Watching fresh within seconds. Set to 0 to disable the staleness layer.  |
 
 ## Hub caching and freshness

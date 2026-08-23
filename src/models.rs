@@ -188,6 +188,9 @@ pub struct PlexContext {
     #[serde(default = "default_as_false", deserialize_with = "bool_from_int")]
     #[salvo(extract(rename = "excludeAllLeaves"))]
     pub exclude_all_leaves: bool,
+    #[serde(default = "default_as_false", deserialize_with = "bool_from_int")]
+    #[salvo(extract(rename = "excludeContinueWatching"))]
+    pub exclude_continue_watching: bool,
     // host of the proxy server
     #[salvo(extract(rename = "host"))]
     pub host: Option<String>,

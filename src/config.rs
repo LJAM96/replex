@@ -38,6 +38,10 @@ pub struct Config {
     /// hubs stale immediately. 0 disables the staleness layer.
     #[serde(default = "default_hub_stale_ttl")]
     pub hub_stale_ttl: u64,
+    /// Seconds between background hub warmer cycles that pre-fetch the hot
+    /// hub payloads with the admin token. 0 disables warming.
+    #[serde(default = "default_warm_interval")]
+    pub warm_interval: u64,
     #[serde(
         default = "default_as_true",
         deserialize_with = "figment::util::bool_from_str_or_int"
@@ -204,6 +208,10 @@ fn default_cache_ttl() -> u64 {
 }
 
 fn default_hub_stale_ttl() -> u64 {
+    5 * 60 // 5 minutes
+}
+
+fn default_warm_interval() -> u64 {
     5 * 60 // 5 minutes
 }
 

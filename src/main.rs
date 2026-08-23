@@ -77,6 +77,8 @@ async fn main() {
     tracing::info!("Replex version {}", version);
     // dbg!(&config);
 
+    replex::hub_cache::spawn_warmer();
+
     let router = route();
     if config.ssl_enable && config.ssl_domain.is_some() {
         let acceptor =

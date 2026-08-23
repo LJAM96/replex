@@ -810,34 +810,93 @@ pub async fn transform_policy_response(
 ///
 /// Upstream hub payloads are identical for every user BEFORE per-user
 /// transforms run (restrictions, visibility, resolution filtering all apply
-/// downstream), so the raw fetch is cached by path+query with the token
-/// stripped. This lets the cache-warmer populate entries that every client
-/// then reads instantly, instead of each client waiting 45-90s for the
-/// upstream server on cold loads.
-fn cache_key_for_request(req: &Request) -> String {
-    let raw = req
-        .uri()
-        .path_and_query()
-        .map(|p| p.as_str().to_string())
-        .unwrap_or_default();
-    // Strip any client token so entries are shared across accounts; the
-    // request itself is still authenticated before we get here.
-    if let Ok(mut url) = Url::parse(&format!("http://x{}", raw)) {
-        let pairs: Vec<(String, String)> = url
-            .query_pairs()
-            .filter(|(k, _)| !k.eq_ignore_ascii_case("X-Plex-Token"))
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        {
-            let mut ser = url.query_pairs_mut();
-            ser.clear();
-            for (k, v) in &pairs {
-                ser.append_pair(k, v);
+/// downstream), so the raw fetch is shared across accounts. The cache key is
+/// canonical: only the directory-selection and paging params define the
+/// payload identity. Everything else clients attach (counts, field excludes,
+/// X-Plex-* metadata) varies per client shape; folding those into the key
+/// would fragment the shared cache so every client shape pays its own slow
+/// cold fetch. Per-request shaping happens after the transforms instead.
+pub(crate) fn cache_key_for_request(req: &Request) -> String {
+    let path = req.uri().path();
+    let queries = req.queries();
+
+    let pick = |name: &str| -> Option<&String> {
+        queries
+            .get(name)
+            .or_else(|| queries.get(&name.to_ascii_lowercase()))
+    };
+
+    let mut parts: Vec<(&str, &String)> = vec![];
+    for name in [
+        "contentDirectoryID",
+        "pinnedContentDirectoryID",
+        "X-Plex-Container-Start",
+        "X-Plex-Container-Size",
+    ] {
+        if let Some(v) = pick(name) {
+            parts.push((name, v));
+        }
+    }
+    if parts.is_empty() {
+        return path.to_string();
+    }
+    let query = parts
+        .iter()
+        .map(|(k, v)| format!("{}={}", k.to_lowercase(), v))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{}?{}", path, query)
+}
+
+/// The upstream fetch is canonical too: one payload per cache key, fetched
+/// with generous params, then shaped per request by `shape_canonical_hubs`.
+/// This keeps PMS's expensive regenerations to one per directory selection.
+fn canonical_fetch_path(req: &Request, key_path: &str) -> String {
+    let queries = req.queries();
+    let mut parts: Vec<(String, String)> = vec![];
+    for (lower, orig) in [
+        ("contentdirectoryid", "contentDirectoryID"),
+        ("pinnedcontentdirectoryid", "pinnedContentDirectoryID"),
+        ("x-plex-container-start", "X-Plex-Container-Start"),
+        ("x-plex-container-size", "X-Plex-Container-Size"),
+    ] {
+        if let Some(v) = queries.get(orig).or_else(|| queries.get(lower)) {
+            parts.push((orig.to_string(), v.clone()));
+        }
+    }
+    let mut query: Vec<String> =
+        parts.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    if !query.iter().any(|p| p.starts_with("includeGuids")) {
+        query.push("includeGuids=1".to_string());
+    }
+    if !query.iter().any(|p| p.starts_with("count=")) {
+        query.push("count=50".to_string());
+    }
+    let base = key_path.split('?').next().unwrap_or(key_path);
+    format!("{}?{}", base, query.join("&"))
+}
+
+/// Shape the canonical payload for this specific request: honor
+/// excludeContinueWatching and per-row count limits clients asked for.
+fn shape_canonical_hubs(container: &mut MediaContainerWrapper<MediaContainer>, context: &PlexContext) {
+    let hubs = container.media_container.children_mut();
+    if context.exclude_continue_watching {
+        hubs.retain(|h| {
+            !h.hub_identifier
+                .as_deref()
+                .map(|id| id.starts_with("home.continue"))
+                .unwrap_or(false)
+        });
+    }
+    if let Some(count) = context.count {
+        for hub in hubs {
+            let children = hub.children_mut();
+            if children.len() > count as usize {
+                children.truncate(count as usize);
+                hub.size = Some(count);
             }
         }
-        return format!("{}{}", url.path(), url.query().map(|q| format!("?{q}")).unwrap_or_default());
     }
-    raw
 }
 
 #[handler]
@@ -850,6 +909,7 @@ pub async fn cached_hubs_response(
     let content_type = get_content_type_from_headers(req.headers_mut());
 
     let key_path = cache_key_for_request(req);
+    let fetch_path = canonical_fetch_path(req, &key_path);
     let config: Config = Config::dynamic(req).extract().unwrap();
 
     // Shared raw-response cache: keyed WITHOUT the client token so the
@@ -874,7 +934,7 @@ pub async fn cached_hubs_response(
                     );
                     crate::hub_cache::spawn_hub_refresh(
                         plex_client.clone(),
-                        key_path.clone(),
+                        fetch_path.clone(),
                         cache_key.clone(),
                     );
                 }
@@ -882,7 +942,7 @@ pub async fn cached_hubs_response(
             }
             None => {
                 let parsed =
-                    crate::hub_cache::fetch_hubs_payload(&plex_client, &key_path)
+                    crate::hub_cache::fetch_hubs_payload(&plex_client, &fetch_path)
                         .await?;
                 plex_client.cache.insert(cache_key.clone(), parsed.clone()).await;
                 crate::hub_cache::track_fetched(cache_key.clone()).await;
@@ -912,6 +972,8 @@ pub async fn cached_hubs_response(
         hubs_after = container.media_container.children().len(),
         "hub payload transformed"
     );
+
+    shape_canonical_hubs(&mut container, &context);
 
     res.render(container);
     Ok(())
