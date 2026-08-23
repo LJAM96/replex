@@ -23,6 +23,29 @@ use salvo::routing::PathFilter;
 use tokio::time::Duration;
 use url::Url;
 
+/// Default dynamic responses to `Cache-Control: no-cache`.
+///
+/// Without an explicit header, browser service workers (Plex Web registers
+/// one) heuristically cache API responses indefinitely, serving stale hub
+/// data with dangling image references. `/web/*` assets set their own
+/// long-lived policy and are left untouched.
+#[handler]
+async fn api_cache_control(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+    ctrl: &mut FlowCtrl,
+) {
+    ctrl.call_next(req, depot, res).await;
+    let is_web_asset = req.uri().path().starts_with("/web/");
+    if !is_web_asset && res.headers().get(header::CACHE_CONTROL).is_none() {
+        res.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-cache"),
+        );
+    }
+}
+
 pub fn route() -> Router {
     let config: Config = Config::figment().extract().unwrap();
 
@@ -32,6 +55,7 @@ pub fn route() -> Router {
 
     let mut router = Router::with_hoop(Cors::permissive().into_handler())
         .hoop(Logger::new())
+        .hoop(api_cache_control)
         .hoop(should_skip)
         .hoop(Timeout::new(Duration::from_secs(60 * 200)))
         .hoop(Compression::new().enable_gzip(CompressionLevel::Fastest));
