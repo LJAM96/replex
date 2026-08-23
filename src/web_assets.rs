@@ -9,7 +9,7 @@
 use crate::cache::{Expiration, GLOBAL_CACHE};
 use crate::config::Config;
 use salvo::http::header::{CACHE_CONTROL, CONTENT_TYPE};
-use salvo::http::{HeaderValue, ResBody, StatusCode};
+use salvo::http::{HeaderName, HeaderValue, ResBody, StatusCode};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -34,6 +34,18 @@ fn cache_policy_for(path: &str) -> &'static str {
         "no-cache"
     } else {
         "public, max-age=31536000, immutable"
+    }
+}
+
+/// Plex Web's service worker caches API responses and images cache-first;
+/// when stale entries pin old hub payloads the only server-side remedy is
+/// asking the browser to drop its cache storage on each app load. This
+/// spares localStorage/cookies so the sign-in survives.
+fn extra_headers_for(path: &str) -> Vec<(&'static str, HeaderValue)> {
+    if path.ends_with("/index.html") {
+        vec![("clear-site-data", HeaderValue::from_static("\"cache\""))]
+    } else {
+        vec![]
     }
 }
 
@@ -109,5 +121,10 @@ pub async fn serve_web_asset(req: &mut Request, res: &mut Response) {
         CACHE_CONTROL,
         HeaderValue::from_static(cache_policy_for(&path)),
     );
+    for (name, value) in extra_headers_for(&path) {
+        if let Ok(v) = HeaderName::from_bytes(name.as_bytes()) {
+            res.headers_mut().insert(v, value);
+        }
+    }
     *res.body_mut() = ResBody::Once(bytes::Bytes::from(asset.body));
 }
