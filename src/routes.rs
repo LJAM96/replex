@@ -202,6 +202,11 @@ pub fn route() -> Router {
         )
         .push(
             Router::new()
+                .path("/web/<**rest>")
+                .get(crate::web_assets::serve_web_asset),
+        )
+        .push(
+            Router::new()
                 .path(format!("{}/<id>", PLEX_HUBS_SECTIONS))
                 .hoop(transform_req_include_guids)
                 .hoop(transform_req_android)
@@ -2015,6 +2020,40 @@ mod tests {
             )
             .await,
             "timeline stop observed through the proxy must mark hubs stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn web_assets_cached_with_immutable_headers() {
+        let _ = tracing_subscriber::fmt::try_init();
+        let server = httpmock::MockServer::start();
+        let asset_mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/web/test-asset.js");
+            then.status(200)
+                .header("content-type", "application/javascript")
+                .body("console.log('hi')");
+        });
+        let _env = crate::test_helpers::pin_default_env(&server.address().to_string());
+
+        let service = Service::new(super::route());
+
+        for i in 0..2 {
+            let mut res = TestClient::get("http://127.0.0.1:5800/web/test-asset.js")
+                .add_header("HOST", &server.address().to_string(), true)
+                .send((&service))
+                .await;
+            assert_eq!(res.status_code, Some(StatusCode::OK), "request {i}");
+            assert_eq!(
+                res.headers().get("cache-control").unwrap(),
+                "public, max-age=31536000, immutable"
+            );
+            assert_eq!(res.headers().get("content-type").unwrap(), "application/javascript");
+        }
+        assert_eq!(
+            asset_mock.hits(),
+            1,
+            "second request must be served from the in-memory cache"
         );
     }
 

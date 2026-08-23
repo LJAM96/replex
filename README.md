@@ -115,6 +115,16 @@ Optionally, if the server owner has Plex Pass, adding `http://<replex>/replex/we
 to the Plex webhooks settings marks the cache stale on Plex events too
 (useful for changes made outside the proxy; requires a publicly reachable URL).
 
+## Web UI asset caching
+
+Plex serves its static web files (`/web/*`) with `Cache-Control: no-cache` and
+no validators, forcing browsers to re-download all of them on every reload.
+Replex caches these immutable content-hashed files in memory and serves them
+with `Cache-Control: public, max-age=31536000, immutable`, so repeat loads of
+the web app skip the upstream round trip entirely (`index.html` and
+translations stay short-lived so app updates still propagate).
+
+
 ## Per-user resolution restrictions
 
 Restrict individual Plex accounts to a maximum media resolution while keeping
