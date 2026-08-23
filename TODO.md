@@ -2,6 +2,10 @@
 
 ## Background hub cache warmer
 
+**DONE 2026-08-23**: implemented as `hub_cache::spawn_warmer` (REPLEX_WARM_INTERVAL).
+Canonical cache keys landed in the same change. Remaining idea: iterate existing
+moka keys instead of rebuilding from /library/sections.
+
 Keep both replex's payload cache and Plex Media Server's internal caches warm
 by periodically fetching the hot hub endpoints in the background.
 
