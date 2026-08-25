@@ -12,6 +12,7 @@ use crate::utils::*;
 use crate::webhooks;
 use http;
 use itertools::Itertools;
+use once_cell::sync::Lazy;
 use salvo::compression::Compression;
 use salvo::cors::Cors;
 use salvo::http::header;
@@ -250,6 +251,7 @@ pub fn route() -> Router {
         )
         .push(
             Router::with_path("/photo/<colon:colon>/transcode")
+                .hoop(photo_cache_hoop)
                 .hoop(fix_photo_transcode_request)
                 .hoop(resolve_local_media_path)
                 .goal(proxy_request),
@@ -257,6 +259,141 @@ pub fn route() -> Router {
         .push(Router::with_path("<**rest>").goal(proxy_request));
 
     router
+}
+
+/// Shared in-memory cache for transcoded poster/art images.
+///
+/// Every /photo/:/transcode hit is a fresh PMS transcode (~0.4-0.7s each);
+/// a home wall of posters therefore costs tens of seconds of serialized
+/// upstream work on first view. Posters are stable per item+size, so cache
+/// them (per unique query minus the client token) and let every user share
+/// the warm entries.
+static PHOTO_CACHE: Lazy<moka::future::Cache<String, CachedImage>> = Lazy::new(|| {
+    moka::future::Cache::builder()
+        .max_capacity(20_000)
+        .time_to_idle(std::time::Duration::from_secs(60 * 60 * 24))
+        .build()
+});
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct CachedImage {
+    content_type: Option<String>,
+    cache_control: Option<String>,
+    body: Vec<u8>,
+}
+
+fn photo_cache_key(req: &Request) -> String {
+    // Strip the per-user token so all accounts share entries; everything
+    // else (item path, dimensions, quality params) defines the image.
+    let raw = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_default();
+    match Url::parse(&format!("http://x{}", raw)) {
+        Ok(mut url) => {
+            let pairs: Vec<(String, String)> = url
+                .query_pairs()
+                .filter(|(k, _)| !k.eq_ignore_ascii_case("X-Plex-Token"))
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            {
+                let mut ser = url.query_pairs_mut();
+                ser.clear();
+                for (k, v) in &pairs {
+                    ser.append_pair(k, v);
+                }
+            }
+            format!("photo:{}", url)
+        }
+        Err(_) => format!("photo:{}", raw),
+    }
+}
+
+/// Cache-aside layer for /photo/:/transcode responses.
+#[handler]
+async fn photo_cache_hoop(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+    ctrl: &mut FlowCtrl,
+) -> Result<(), anyhow::Error> {
+    let key = photo_cache_key(req);
+
+    if let Some(img) = PHOTO_CACHE.get(&key).await {
+        if let Some(ct) = img.content_type.as_deref() {
+            if let Ok(v) = header::HeaderValue::from_str(ct) {
+                res.headers_mut().insert(CONTENT_TYPE, v);
+            }
+        }
+        if let Some(cc) = img.cache_control.as_deref() {
+            if let Ok(v) = header::HeaderValue::from_str(cc) {
+                res.headers_mut().insert(header::CACHE_CONTROL, v);
+            }
+        }
+        *res.body_mut() =
+            salvo::http::body::ResBody::Once(bytes::Bytes::from(img.body));
+        return Ok(());
+    }
+
+    do_proxy_request(req, res, depot, ctrl).await;
+
+    // Only cache successful image payloads.
+    let status_ok = res.status_code.unwrap_or(StatusCode::OK).is_success();
+    let is_image = res
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.starts_with("image/"))
+        .unwrap_or(false);
+    if !(status_ok && is_image) {
+        return Ok(());
+    }
+
+    let taken = std::mem::replace(res.body_mut(), salvo::http::body::ResBody::None);
+    if let salvo::http::body::ResBody::Once(body) = taken {
+        let should_cache =
+            body.len() <= 4 * 1024 * 1024
+                && res
+                    .headers()
+                    .get(CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| v.starts_with("image/"))
+                    .unwrap_or(false)
+                && res.status_code.unwrap_or(StatusCode::OK).is_success();
+        if should_cache {
+            let entry = CachedImage {
+                content_type: res
+                    .headers()
+                    .get(CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string()),
+                cache_control: res
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string()),
+                body: body.to_vec(),
+            };
+            let n = entry.body.len();
+            PHOTO_CACHE.insert(key, entry).await;
+            tracing::debug!(bytes = n, "cached photo response");
+        }
+        *res.body_mut() = salvo::http::body::ResBody::Once(body);
+    }
+    Ok(())
+}
+
+/// Raw proxy pass-through shared by the catch-all handler and the
+/// photo cache hoop.
+async fn do_proxy_request(
+    req: &mut Request,
+    res: &mut Response,
+    depot: &mut Depot,
+    ctrl: &mut FlowCtrl,
+) {
+    let proxy = default_proxy();
+    proxy.handle(req, depot, res, ctrl).await;
 }
 
 #[handler]
@@ -277,8 +414,7 @@ async fn proxy_request(
             "playback change observed, hub cache marked stale"
         );
     }
-    let proxy = default_proxy();
-    proxy.handle(req, depot, res, ctrl).await;
+    do_proxy_request(req, res, depot, ctrl).await;
 }
 
 #[handler]
