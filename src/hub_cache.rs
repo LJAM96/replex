@@ -15,6 +15,7 @@ use crate::models::*;
 use crate::plex_client::PlexClient;
 use crate::utils::from_reqwest_response;
 use crate::config::Config;
+use crate::routes::PHOTO_CACHE;
 use moka::future::Cache;
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
@@ -285,6 +286,8 @@ async fn warm_cycle() {
     };
     let client = PlexClient::from_context(&context);
 
+    let mut warmed: Vec<(String, crate::models::MediaContainerWrapper<crate::models::MediaContainer>)> = Vec::new();
+
     for path in warm_paths(&host, &token).await {
         let fetch_path = if path.contains('?') {
             format!("{}&includeGuids=1&count=50", path)
@@ -304,8 +307,9 @@ async fn warm_cycle() {
         }
         match fetch_hubs_payload(&client, &fetch_path).await {
             Ok(payload) => {
-                client.cache.insert(cache_key.clone(), payload).await;
+                client.cache.insert(cache_key.clone(), payload.clone()).await;
                 track_fetched(cache_key.clone()).await;
+                warmed.push((fetch_path.clone(), payload));
                 tracing::debug!(path = %fetch_path, "warmed hub payload");
             }
             Err(e) => {
@@ -315,6 +319,86 @@ async fn warm_cycle() {
         let mut inflight = REFRESH_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
         inflight.remove(&cache_key);
     }
+
+    // Poster prefetch: pre-transcode thumbs from the warmed rows so a
+    // user's FIRST view of home is fully warm too. The photo cache is
+    // shared across users; skip anything already cached.
+    const POSTERS_PER_ROW: usize = 12;
+    const POSTER_BUDGET: usize = 400;
+    let mut budget = POSTER_BUDGET;
+    let mut fetched = 0usize;
+    'outer: for (_, payload) in warmed.iter() {
+        let mut payload = payload.clone();
+        for hub in payload.media_container.children_mut() {
+            for item in hub.children().iter().take(POSTERS_PER_ROW) {
+                if budget == 0 {
+                    break 'outer;
+                }
+                let Some(thumb) = item.thumb.as_deref() else {
+                    continue;
+                };
+                let tq = match build_transcode_query(thumb) {
+                    Some(q) => q,
+                    None => continue,
+                };
+                let key =
+                    crate::routes::canonical_photo_key(&format!("/photo/:/transcode?{tq}"));
+                if PHOTO_CACHE.get(&key).await.is_some() {
+                    continue;
+                }
+                match client.get(tq.clone()).await {
+                    Ok(r) if r.status() == reqwest::StatusCode::OK => {
+                        let ct = r
+                            .headers()
+                            .get(reqwest::header::CONTENT_TYPE)
+                            .and_then(|v| v.to_str().ok())
+                            .map(|s| s.to_string());
+                        match r.bytes().await {
+                            Ok(bytes) if bytes.len() <= 4 * 1024 * 1024 => {
+                                PHOTO_CACHE.insert(
+                                    key,
+                                    crate::routes::CachedImage {
+                                        content_type: ct,
+                                        cache_control: Some(
+                                            "public, max-age=259200".to_string(),
+                                        ),
+                                        body: bytes.to_vec(),
+                                    },
+                                )
+                                .await;
+                                budget -= 1;
+                                fetched += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::debug!(error = %e, "poster prefetch failed");
+                    }
+                }
+            }
+        }
+    }
+    if fetched > 0 {
+        tracing::info!(count = fetched, "poster prefetch complete");
+    }
+}
+
+/// Build a canonical poster transcode query for a thumb path, matching
+/// the dimensions Plex Web requests so warmed entries land on the exact
+/// cache keys clients look up.
+fn build_transcode_query(thumb: &str) -> Option<String> {
+    let mut url = url::Url::parse("http://x/photo/:/transcode").ok()?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("width", "240");
+        pairs.append_pair("height", "360");
+        pairs.append_pair("minSize", "1");
+        pairs.append_pair("upscale", "1");
+        pairs.append_pair("url", thumb);
+    }
+    url.query().map(|q| q.to_string())
 }
 
 /// Start the background warmer loop. Runs forever; call once at startup.

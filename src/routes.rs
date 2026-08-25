@@ -268,7 +268,7 @@ pub fn route() -> Router {
 /// upstream work on first view. Posters are stable per item+size, so cache
 /// them (per unique query minus the client token) and let every user share
 /// the warm entries.
-static PHOTO_CACHE: Lazy<moka::future::Cache<String, CachedImage>> = Lazy::new(|| {
+pub(crate) static PHOTO_CACHE: Lazy<moka::future::Cache<String, CachedImage>> = Lazy::new(|| {
     moka::future::Cache::builder()
         .max_capacity(20_000)
         .time_to_idle(std::time::Duration::from_secs(60 * 60 * 24))
@@ -276,26 +276,39 @@ static PHOTO_CACHE: Lazy<moka::future::Cache<String, CachedImage>> = Lazy::new(|
 });
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct CachedImage {
-    content_type: Option<String>,
-    cache_control: Option<String>,
-    body: Vec<u8>,
+pub(crate) struct CachedImage {
+    pub(crate) content_type: Option<String>,
+    pub(crate) cache_control: Option<String>,
+    pub(crate) body: Vec<u8>,
 }
 
 fn photo_cache_key(req: &Request) -> String {
-    // Strip the per-user token so all accounts share entries; everything
-    // else (item path, dimensions, quality params) defines the image.
     let raw = req
         .uri()
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_default();
+    canonical_photo_key(&raw)
+}
+
+/// Canonical key for a photo request path+query. Strips the per-user
+/// token from BOTH the top-level query and inside the nested `url=`
+/// parameter (Plex Web appends its own token there), so every account
+/// shares one cache entry per unique image.
+pub(crate) fn canonical_photo_key(raw: &str) -> String {
     match Url::parse(&format!("http://x{}", raw)) {
         Ok(mut url) => {
             let pairs: Vec<(String, String)> = url
                 .query_pairs()
                 .filter(|(k, _)| !k.eq_ignore_ascii_case("X-Plex-Token"))
-                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .map(|(k, v)| {
+                    let k = k.to_string();
+                    if k == "url" {
+                        (k.clone(), strip_inner_token(&v))
+                    } else {
+                        (k.clone(), v.to_string())
+                    }
+                })
                 .collect();
             {
                 let mut ser = url.query_pairs_mut();
@@ -307,6 +320,27 @@ fn photo_cache_key(req: &Request) -> String {
             format!("photo:{}", url)
         }
         Err(_) => format!("photo:{}", raw),
+    }
+}
+
+fn strip_inner_token(v: &str) -> String {
+    match v.find_once_token() {
+        Some(idx) => v[..idx].trim_end_matches('?').to_string(),
+        None => v.to_string(),
+    }
+}
+
+trait FindOnceToken {
+    fn find_once_token(&self) -> Option<usize>;
+}
+impl FindOnceToken for str {
+    fn find_once_token(&self) -> Option<usize> {
+        let lower = self.to_ascii_lowercase();
+        ["x-plex-token=", "&x-plex-token="]
+            .iter()
+            .filter_map(|needle| lower.find(needle).map(|i| (i, needle.len())))
+            .min_by(|a, b| a.0.cmp(&b.0))
+            .map(|(i, _)| i)
     }
 }
 
