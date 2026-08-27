@@ -156,6 +156,7 @@ pub fn route() -> Router {
             .push(
                 Router::new()
                     .path("/library/sections/<**rest>")
+                    .hoop(library_cache_hoop)
                     .hoop(proxy_for_transform)
                     .get(transform_policy_response),
             )
@@ -344,6 +345,54 @@ impl FindOnceToken for str {
     }
 }
 
+fn library_cache_key(req: &Request) -> String {
+    let raw = req.uri().path_and_query().map(|p| p.to_string()).unwrap_or_default();
+    let token_hash = req
+        .headers()
+        .get("X-Plex-Token")
+        .and_then(|v| v.to_str().ok())
+        .map(|t| &t[..8.min(t.len())])
+        .unwrap_or("anon");
+    format!("library:{}:{}", token_hash, raw)
+}
+
+#[handler]
+async fn library_cache_hoop(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+    ctrl: &mut FlowCtrl,
+) -> Result<(), anyhow::Error> {
+    if !req.uri().path().starts_with("/library/sections/") {
+        ctrl.call_next(req, depot, res).await;
+        return Ok(());
+    }
+    let key = library_cache_key(req);
+    if let Some(data) = crate::disk_cache::get(&key).await {
+        res.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-cache"),
+        );
+        res.headers_mut()
+            .insert(CONTENT_TYPE, header::HeaderValue::from_static("application/json"));
+        *res.body_mut() = salvo::http::body::ResBody::Once(bytes::Bytes::from(data));
+        ctrl.skip_rest();
+        return Ok(());
+    }
+    ctrl.call_next(req, depot, res).await;
+    if res.status_code.unwrap_or(StatusCode::OK).is_success() {
+        let taken = std::mem::replace(res.body_mut(), salvo::http::body::ResBody::None);
+        if let salvo::http::body::ResBody::Once(body) = taken {
+            let bytes = body.to_vec();
+            let _ = crate::disk_cache::put(&key, &bytes).await;
+            *res.body_mut() = salvo::http::body::ResBody::Once(bytes::Bytes::from(bytes));
+        } else {
+            *res.body_mut() = taken;
+        }
+    }
+    Ok(())
+}
+
 /// Cache-aside layer for /photo/:/transcode responses.
 #[handler]
 async fn photo_cache_hoop(
@@ -353,7 +402,18 @@ async fn photo_cache_hoop(
     ctrl: &mut FlowCtrl,
 ) -> Result<(), anyhow::Error> {
     let key = photo_cache_key(req);
-
+    if let Some(data) = crate::disk_cache::get(&key).await {
+        res.headers_mut().insert(
+            CONTENT_TYPE,
+            header::HeaderValue::from_static("image/jpeg"),
+        );
+        res.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("public, max-age=259200"),
+        );
+        *res.body_mut() = salvo::http::body::ResBody::Once(bytes::Bytes::from(data));
+        return Ok(());
+    }
     if let Some(img) = PHOTO_CACHE.get(&key).await {
         if let Some(ct) = img.content_type.as_deref() {
             if let Ok(v) = header::HeaderValue::from_str(ct) {
@@ -410,7 +470,8 @@ async fn photo_cache_hoop(
                 body: body.to_vec(),
             };
             let n = entry.body.len();
-            PHOTO_CACHE.insert(key, entry).await;
+            PHOTO_CACHE.insert(key.clone(), entry).await;
+            let _ = crate::disk_cache::put(&key, &body).await;
             tracing::debug!(bytes = n, "cached photo response");
         }
         *res.body_mut() = salvo::http::body::ResBody::Once(body);

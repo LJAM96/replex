@@ -77,6 +77,7 @@ async fn main() {
     tracing::info!("Replex version {}", version);
     // dbg!(&config);
 
+    replex::disk_cache::init().await;
     replex::hub_cache::spawn_warmer();
 
     let router = route();

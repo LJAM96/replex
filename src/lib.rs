@@ -16,6 +16,7 @@ pub mod resolution_policy;
 pub mod transform;
 pub mod logging;
 pub mod cache;
+pub mod disk_cache;
 pub mod hub_cache;
 pub mod web_assets;
 pub mod routes;

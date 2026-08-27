@@ -356,9 +356,9 @@ async fn warm_cycle() {
                         match r.bytes().await {
                             Ok(bytes) if bytes.len() <= 4 * 1024 * 1024 => {
                                 PHOTO_CACHE.insert(
-                                    key,
+                                    key.clone(),
                                     crate::routes::CachedImage {
-                                        content_type: ct,
+                                        content_type: ct.clone(),
                                         cache_control: Some(
                                             "public, max-age=259200".to_string(),
                                         ),
@@ -366,6 +366,7 @@ async fn warm_cycle() {
                                     },
                                 )
                                 .await;
+                                let _ = crate::disk_cache::put(&key, &bytes).await;
                                 budget -= 1;
                                 fetched += 1;
                             }
@@ -382,6 +383,67 @@ async fn warm_cycle() {
     }
     if fetched > 0 {
         tracing::info!(count = fetched, "poster prefetch complete");
+    }
+
+    warm_library_pages(&client, &host, &token).await;
+}
+
+async fn warm_library_pages(client: &PlexClient, host: &str, token: &str) {
+    let sections = {
+        let url = format!("{}/library/sections", host.trim_end_matches('/'));
+        let resp = match reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap()
+            .get(&url).header("Accept", "application/json").header("X-Plex-Token", token).send().await {
+            Ok(r) if r.status() == reqwest::StatusCode::OK => r,
+            _ => return,
+        };
+        #[derive(serde::Deserialize)] struct Sections { #[serde(rename = "Directory", default)] directory: Vec<Section> }
+        #[derive(serde::Deserialize)] struct Section { key: String }
+        match resp.json::<crate::models::MediaContainerWrapper<Sections>>().await {
+            Ok(s) => s.media_container.directory.into_iter().map(|d| d.key).collect::<Vec<_>>(),
+            Err(_) => return,
+        }
+    };
+    if sections.is_empty() { return; }
+    for section in &sections {
+        let section_id = section.as_str();
+        for start in (0..250).step_by(50) {
+            let path = format!("/library/sections/{}/all?X-Plex-Container-Start={}&X-Plex-Container-Size=50", section_id, start);
+            let cache_key = format!("library:{}:{}:50:{}", section_id, start, &token[..8.min(token.len())]);
+            if crate::disk_cache::get(&cache_key).await.is_some() {
+                continue;
+            }
+            let url = format!("{}{}", host.trim_end_matches('/'), path);
+            let resp = match reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap()
+                .get(&url)
+                .header("Accept", "application/json")
+                .header("X-Plex-Token", token)
+                .send()
+                .await
+            {
+                Ok(r) if r.status() == reqwest::StatusCode::OK => r,
+                Ok(r) => {
+                    tracing::debug!(status = %r.status(), path = %path, "library warm non-200");
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, path = %path, "library warm failed");
+                    break;
+                }
+            };
+            let bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(_) => break,
+            };
+            let _ = crate::disk_cache::put(&cache_key, &bytes).await;
+            tracing::debug!(section = %section_id, start = start, bytes = bytes.len(), "warmed library page");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if bytes.len() < 1000 {
+                break;
+            }
+        }
     }
 }
 
