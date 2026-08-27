@@ -661,8 +661,12 @@ async fn protected_redirect_stream(
     }
 
     // Direct media part request: validate against known part permissions.
+    // The lookup is scoped to THIS account and its current policy, so one
+    // account's cached decision can never authorise another's request.
     if let Some(part_id) = req.param::<i64>("partid") {
-        match crate::plex_client::PART_POLICY_CACHE.get(&part_id).await {
+        let part_key =
+            crate::plex_client::part_policy_key(&identity.uuid, &policy, part_id);
+        match crate::plex_client::PART_POLICY_CACHE.get(&part_key).await {
             Some(true) => {
                 tracing::debug!(
                     username = %identity.username,
@@ -1167,10 +1171,14 @@ pub async fn cached_hubs_response(
     let fetch_path = canonical_fetch_path(req, &key_path);
     let config: Config = Config::dynamic(req).extract().unwrap();
 
-    // Shared raw-response cache: keyed WITHOUT the client token so the
-    // warmer (admin token) and every user read/write the same entries.
-    // Per-user transforms still run below on every request.
-    let cache_key = format!("hubcache:{key_path}");
+    // Shared raw-response cache for genuinely global discovery rows, keyed
+    // WITHOUT the client token so the warmer (admin token) and every user
+    // read/write the same entries. Account-specific hubs (Continue Watching,
+    // On Deck, home/promoted rows with personal membership) get a
+    // token-hash-scoped key so one account can never be served another
+    // account's payload. Per-user transforms still run below on every
+    // request either way.
+    let cache_key = crate::hub_cache::hub_cache_key(&key_path, context.token.as_deref());
     let mut container: MediaContainerWrapper<MediaContainer> =
         match plex_client.cache.get(&cache_key).await {
             Some(mut cached) => {
@@ -2073,8 +2081,9 @@ async fn enforce_resolution_policy(
     }
 
     // Record which parts belong to permitted versions so direct
-    // /library/parts requests can be validated later.
-    cache_part_policy(media, &policy).await;
+    // /library/parts requests can be validated later. Scoped to this
+    // account and its current policy; never shared across users.
+    cache_part_policy(media, &policy, &identity.uuid).await;
 
     let screen_resolution = context
         .screen_resolution

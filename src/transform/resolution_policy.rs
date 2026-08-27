@@ -16,16 +16,27 @@ use super::Transform;
 pub struct ResolutionPolicyTransform;
 
 impl ResolutionPolicyTransform {
-    /// Resolve the effective policy for this request.
+    /// Resolve the effective policy for this request, together with the
+    /// verified identity it was resolved for (needed to scope part policy
+    /// cache entries per account).
     ///
     /// Identity lookups hit the per-token cache, so repeated calls across
     /// items in one response cost effectively nothing after the first.
     async fn current_policy(
         plex_client: &PlexClient,
-    ) -> Result<ResolutionPolicy, ()> {
+    ) -> Result<(ResolutionPolicy, UserIdentity), ()> {
         let config: Config = Config::figment().extract().unwrap();
         if !config.resolution_policy_enabled {
-            return Ok(ResolutionPolicy::unrestricted());
+            return Ok((
+                ResolutionPolicy::unrestricted(),
+                // Unused: the unrestricted policy short-circuits every caller
+                // before the part policy cache is consulted.
+                UserIdentity {
+                    id: 0,
+                    uuid: String::new(),
+                    username: String::new(),
+                },
+            ));
         }
 
         let identity = plex_client.get_current_user().await.map_err(|e| {
@@ -35,12 +46,13 @@ impl ResolutionPolicyTransform {
             );
         })?;
 
-        Ok(resolve_policy(
+        let policy = resolve_policy(
             &config.user_resolution_policies,
             config.resolution_default,
             config.hidden_collections.as_deref().unwrap_or(&[]),
             &identity,
-        ))
+        );
+        Ok((policy, identity))
     }
 }
 
@@ -52,8 +64,8 @@ impl Transform for ResolutionPolicyTransform {
         plex_client: PlexClient,
         _options: PlexContext,
     ) {
-        let policy = match Self::current_policy(&plex_client).await {
-            Ok(policy) => policy,
+        let (policy, identity) = match Self::current_policy(&plex_client).await {
+            Ok((policy, identity)) => (policy, identity),
             Err(_) => {
                 // Fail closed: strip every version so nothing playable leaks.
                 let config: Config = Config::figment().extract().unwrap();
@@ -69,8 +81,9 @@ impl Transform for ResolutionPolicyTransform {
         }
 
         // Record part permissions before stripping so direct /library/parts
-        // requests can be validated even for items never played.
-        crate::plex_client::cache_part_policy(&item.media, &policy).await;
+        // requests can be validated even for items never played. Scoped to
+        // this account and its current policy; never shared across users.
+        crate::plex_client::cache_part_policy(&item.media, &policy, &identity.uuid).await;
 
         let before = count_media(item);
         strip_media_recursive(item, &policy);
@@ -93,8 +106,8 @@ impl Transform for ResolutionPolicyTransform {
         plex_client: PlexClient,
         _options: PlexContext,
     ) -> bool {
-        let policy = match Self::current_policy(&plex_client).await {
-            Ok(policy) => policy,
+        let (policy, _identity) = match Self::current_policy(&plex_client).await {
+            Ok((policy, identity)) => (policy, identity),
             Err(_) => {
                 let config: Config = Config::figment().extract().unwrap();
                 if config.resolution_policy_fail_closed
@@ -142,8 +155,8 @@ impl Transform for ResolutionPolicyTransform {
     ) -> bool {
         // Hubs wrap their items in nested metadata; a hub whose entire
         // content is blocked should disappear too.
-        let policy = match Self::current_policy(&plex_client).await {
-            Ok(policy) => policy,
+        let (policy, _identity) = match Self::current_policy(&plex_client).await {
+            Ok((policy, identity)) => (policy, identity),
             Err(_) => return true, // item-level fail-closed already handled
         };
         let _ = item;
@@ -233,7 +246,7 @@ impl Transform for CollectionVisibilityTransform {
         _options: PlexContext,
     ) -> bool {
         match ResolutionPolicyTransform::current_policy(&plex_client).await {
-            Ok(policy) => {
+            Ok((policy, _identity)) => {
                 if Self::is_hidden(&item, &policy) {
                     tracing::debug!(
                         title = %item.title,

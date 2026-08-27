@@ -47,6 +47,49 @@ pub(crate) async fn track_fetched(cache_key: String) {
     HUB_FETCHED_AT.insert(cache_key, Instant::now()).await;
 }
 
+/// Hub payloads that Plex generates per account. These must never be served
+/// from a cache entry fetched with another account's token:
+/// - `continueWatching` / `ondeck` are derived entirely from that account's
+///   watch state.
+/// - `home` and `promoted` embed Continue Watching / On Deck rows whose
+///   *membership* is account specific; the per-user transforms can prune
+///   entries but cannot rebuild another account's rows.
+/// Everything else (e.g. `/hubs/sections/<id>` discovery rows such as
+/// Recently Added) is genuinely shared and stays in the common cache.
+pub fn is_user_scoped_hub(key_path: &str) -> bool {
+    let lower = key_path.to_ascii_lowercase();
+    lower.contains("continuewatching")
+        || lower.contains("ondeck")
+        || lower.contains("/hubs/home")
+        || lower.contains("/hubs/promoted")
+}
+
+/// Short hash of a token used as the user-scope component of cache keys.
+/// Raw tokens never appear in cache keys.
+fn hub_user_scope(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(token.as_bytes());
+    data_encoding::HEXLOWER.encode(&digest)[..16].to_string()
+}
+
+/// Build the canonical hub cache key for a request path.
+///
+/// User-scoped hubs embed a hash of the requesting token so each account
+/// reads only payloads fetched with its own credentials; all other hubs
+/// share one entry (per-user transforms still run after retrieval).
+/// The warmer must build keys through this same function so warmed entries
+/// land where the matching requests look them up.
+pub fn hub_cache_key(key_path: &str, token: Option<&str>) -> String {
+    if is_user_scoped_hub(key_path) {
+        match token {
+            Some(t) => format!("hubcache:u:{}:{}", hub_user_scope(t), key_path),
+            None => format!("hubcache:u:anon:{key_path}"),
+        }
+    } else {
+        format!("hubcache:{key_path}")
+    }
+}
+
 /// Pure staleness decision so tests can inject timestamps.
 fn is_older_than(fetched_at: Option<Instant>, max_age: Duration, now: Instant) -> bool {
     match fetched_at {
@@ -295,12 +338,17 @@ async fn warm_cycle() {
             format!("{}?includeGuids=1&count=50", path)
         };
         // Compute the cache key with the exact same logic client requests
-        // go through, so warmer entries land where lookups land.
+        // go through, so warmer entries land where lookups land. Passing
+        // the admin token keeps user-scoped hubs (Continue Watching, home,
+        // promoted) consistent with admin requests.
         let cache_key = {
             let mut probe = salvo::http::Request::default();
             let uri: hyper::Uri = fetch_path.parse().expect("valid warm path");
             probe.set_uri(uri);
-            format!("hubcache:{}", crate::routes::cache_key_for_request(&probe))
+            crate::hub_cache::hub_cache_key(
+                &crate::routes::cache_key_for_request(&probe),
+                Some(&token),
+            )
         };
         if !claim_refresh(&cache_key) {
             continue;
@@ -483,6 +531,47 @@ pub fn spawn_warmer() {
 mod tests {
     use super::*;
     use crate::plex_client::PlexClient;
+
+    #[test]
+    fn user_scoped_hub_classification() {
+        // Account-specific payloads must be user scoped.
+        assert!(is_user_scoped_hub("/hubs/continueWatching"));
+        assert!(is_user_scoped_hub(
+            "/hubs/continueWatching?contentdirectoryid=1,2"
+        ));
+        assert!(is_user_scoped_hub("/hubs/onDeck"));
+        assert!(is_user_scoped_hub("/hubs/home"));
+        assert!(is_user_scoped_hub("/hubs/promoted?contentdirectoryid=23"));
+        // Library discovery rows are genuinely shared.
+        assert!(!is_user_scoped_hub("/hubs/sections/6"));
+        assert!(!is_user_scoped_hub("/library/sections/6/all"));
+    }
+
+    #[test]
+    fn user_scoped_hubs_get_per_token_keys() {
+        let global = hub_cache_key("/hubs/sections/6", Some("tokenA"));
+        assert_eq!(global, "hubcache:/hubs/sections/6");
+
+        let a1 = hub_cache_key("/hubs/continueWatching", Some("tokenA"));
+        let a2 = hub_cache_key("/hubs/continueWatching", Some("tokenA"));
+        let b = hub_cache_key("/hubs/continueWatching", Some("tokenB"));
+        assert_eq!(a1, a2, "same token must hit the same entry");
+        assert_ne!(
+            a1, b,
+            "different accounts must never share Continue Watching"
+        );
+        assert!(a1.starts_with("hubcache:u:"));
+        assert!(!a1.contains("tokenA"), "raw tokens must not appear in keys");
+
+        let anon = hub_cache_key("/hubs/continueWatching", None);
+        assert_eq!(anon, "hubcache:u:anon:/hubs/continueWatching");
+
+        // Warmer and request path must derive identical keys from the same
+        // inputs, or warmed entries would land where nothing looks them up.
+        let warm = hub_cache_key("/hubs/promoted?contentdirectoryid=23", Some("admin"));
+        let request = hub_cache_key("/hubs/promoted?contentdirectoryid=23", Some("admin"));
+        assert_eq!(warm, request);
+    }
 
     fn client_for_cache(host: String) -> PlexClient {
         let context = crate::models::PlexContext {

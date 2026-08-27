@@ -51,11 +51,17 @@ static IDENTITY_CACHE: Lazy<Cache<String, UserIdentity>> = Lazy::new(|| {
         .build()
 });
 
-/// Media part id -> whether that part belongs to a version permitted for the
-/// requesting account. Populated whenever an item's versions are evaluated
-/// (playback enforcement, metadata filtering). Unknown parts are handled by
-/// the strict stream guard at request time.
-pub static PART_POLICY_CACHE: Lazy<Cache<i64, bool>> = Lazy::new(|| {
+/// Media part permission decisions, keyed by
+/// `(verified user uuid, policy fingerprint, part id)`.
+///
+/// The decision "is this part permitted" is a pure function of the
+/// requesting account's policy and the part's media version, so the key
+/// MUST capture both. Keying by part id alone would let one account's
+/// permission decision (e.g. a 4K-permitted account priming a 4K part)
+/// authorise a different account that is restricted to 1080p.
+pub type PartPolicyKey = (String, String, i64);
+
+pub static PART_POLICY_CACHE: Lazy<Cache<PartPolicyKey, bool>> = Lazy::new(|| {
     let c: Config = Config::figment().extract().unwrap();
     Cache::builder()
         .max_capacity(100_000)
@@ -63,15 +69,39 @@ pub static PART_POLICY_CACHE: Lazy<Cache<i64, bool>> = Lazy::new(|| {
         .build()
 });
 
-/// Record the permitted/blocked status of every part of every media version.
+/// Stable fingerprint of every policy input that `media_allowed` consults.
+/// Keep this in sync with `media_allowed`: if it ever reads more policy
+/// fields, they must be folded in here.
+pub fn part_policy_fingerprint(policy: &crate::resolution_policy::ResolutionPolicy) -> String {
+    format!("{:?}", policy.limit)
+}
+
+/// Build the cache key for one part-permission decision.
+pub fn part_policy_key(
+    user_uuid: &str,
+    policy: &crate::resolution_policy::ResolutionPolicy,
+    part_id: i64,
+) -> PartPolicyKey {
+    (
+        user_uuid.to_string(),
+        part_policy_fingerprint(policy),
+        part_id,
+    )
+}
+
+/// Record the permitted/blocked status of every part of every media version,
+/// scoped to the verified account and its current policy.
 pub async fn cache_part_policy(
     media: &[Media],
     policy: &crate::resolution_policy::ResolutionPolicy,
+    user_uuid: &str,
 ) {
     for m in media {
         let allowed = crate::resolution_policy::media_allowed(m, policy);
         for part in &m.parts {
-            PART_POLICY_CACHE.insert(part.id, allowed).await;
+            PART_POLICY_CACHE
+                .insert(part_policy_key(user_uuid, policy, part.id), allowed)
+                .await;
         }
     }
 }
@@ -1062,3 +1092,60 @@ impl PlexClient {
 //         assert_eq!(content, "Hello World");
 //     }
 // }
+
+#[cfg(test)]
+mod part_policy_cache_tests {
+    use super::*;
+    use crate::resolution_policy::{ResolutionLimit, ResolutionPolicy};
+
+    fn policy(limit: ResolutionLimit) -> ResolutionPolicy {
+        ResolutionPolicy {
+            limit,
+            max_bitrate: None,
+            hidden_collections: vec![],
+        }
+    }
+
+    /// Regression test for the cross-user part policy cache bug: the cache
+    /// key must capture the verified user and the policy, so a 4K-permitted
+    /// account priming a part can never authorise a 1080p-restricted account.
+    #[test]
+    fn keys_differ_across_users_and_policies() {
+        let p1080 = policy(ResolutionLimit::P1080);
+        let p4k = policy(ResolutionLimit::P2160);
+
+        let user_a_1080 = part_policy_key("uuid-a", &p1080, 123);
+        let user_b_1080 = part_policy_key("uuid-b", &p1080, 123);
+        let user_a_4k = part_policy_key("uuid-a", &p4k, 123);
+
+        assert_ne!(
+            user_a_1080, user_b_1080,
+            "same part, different accounts must not share decisions"
+        );
+        assert_ne!(
+            user_a_1080, user_a_4k,
+            "same account, changed policy must not reuse old decisions"
+        );
+        assert_eq!(
+            user_a_1080,
+            part_policy_key("uuid-a", &p1080, 123),
+            "same user + policy must hit the same entry"
+        );
+    }
+
+    #[test]
+    fn fingerprint_tracks_the_limit() {
+        assert_eq!(
+            part_policy_fingerprint(&policy(ResolutionLimit::P1080)),
+            part_policy_fingerprint(&policy(ResolutionLimit::P1080))
+        );
+        assert_ne!(
+            part_policy_fingerprint(&policy(ResolutionLimit::P1080)),
+            part_policy_fingerprint(&policy(ResolutionLimit::P2160))
+        );
+        assert_ne!(
+            part_policy_fingerprint(&policy(ResolutionLimit::P1080)),
+            part_policy_fingerprint(&policy(ResolutionLimit::Unlimited))
+        );
+    }
+}
