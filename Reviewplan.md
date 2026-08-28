@@ -1,3 +1,56 @@
+# Review resolution status
+
+**Updated 2026-08-27, after fixes against `main` (base review commit `5ab90c3`).**
+
+## Priority outcomes
+
+- **P0 (all resolved).** `PART_POLICY_CACHE` is keyed by
+  `(verified user uuid, policy fingerprint, part id)`; Continue Watching /
+  On Deck / home / promoted hubs are user-scoped by token hash, with warmer
+  parity and unit tests (commit `0c34d9f`). The enforcement question was
+  decided: resolution limits are **convenience, not enforcement** — this is
+  now stated explicitly in `README.md` and `docker/portainer-stack.yml`
+  (including the stream-redirect caveat), so the direct-origin bypass is a
+  documented property of the deployment rather than an undocumented
+  contradiction.
+- **P1 (all resolved).**
+  1. Persistent library caching redesigned: the disk cache stores the RAW
+     upstream payload (`library_cache_store`), and `library_cache_lookup`
+     re-runs `apply_policy_transforms()` with the requesting account's
+     current policy on every hit. Corrupt entries are evicted and refetched
+     (`disk_cache::remove`). `disk_cache::put` no longer drifts the size
+     counter on overwrite.
+  2. Library warmer key mismatch fixed: one canonical function
+     (`routes::library_cache_key_for`) is used by both the request path and
+     the warmer; client-shaping noise (`X-Plex-*` metadata, field-trimming
+     params) is canonicalized away and misses fetch normalized supersets,
+     so warmed entries are consumed by real client requests. Keys are
+     user-scoped by token SHA-256 (raw library payloads embed per-account
+     watch state).
+  3. Cross-user integration tests added:
+     `cross_user_library_sections_isolation` (unlimited vs 1080p account
+     through the real router: per-account filtering, no shared cache scope,
+     restrictions survive cache hits), `policy_change_is_honoured_on_library_
+     disk_cache_hits` (the "Monday 4K / Tuesday 1080p" scenario), plus
+     warmer/request key-parity and fetch-normalization tests.
+     `tests/direct_parts.rs` already covered the cross-user part guard.
+
+## Verification
+
+Full suite green at time of writing: 51 tests passed, 0 failed (47 lib
+tests + playback, identity, direct_parts integration suites). Clippy clean
+on all files touched by these fixes.
+
+## Still open (P2)
+
+Atomic disk-cache writes (tmp + rename), persisted photo content type for
+disk hits, removing the `/replex/test_proxy` route from release builds,
+tightening permissive CORS, panic-path hardening for hostile headers/params,
+CI running fmt/clippy/test before Docker publishing, Docker `USER` /
+healthcheck hardening.
+
+---
+
 I reviewed the current `main` branch at commit `5ab90c3129dbbee881946f8016b9756f39c71af7`, committed on 27 August 2026. 
 
 My overall assessment is that the fork has moved Replex in a genuinely useful direction. The per account resolution work is substantially better designed than I expected, the identity verification logic is thoughtful, and the caching work is targeting the right bottlenecks. However, I would **not currently treat the resolution restrictions as a reliable access control boundary**. There are several concrete cross user caching issues that need fixing first.

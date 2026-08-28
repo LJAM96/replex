@@ -133,6 +133,15 @@ everything in one library. 1080p and 4K versions stay merged under the same
 item; restricted accounts simply never see or reach the versions above their
 limit.
 
+> **Intent: convenience, not enforcement.** These limits exist to save
+> bandwidth and match what restricted accounts' devices can actually use —
+> they are **not a security boundary**. Anyone with direct network access to
+> the Plex server and a token that the server accepts can construct requests
+> that bypass every restriction described below. If you need hard
+> enforcement, the Plex origin must be unreachable by restricted clients
+> (firewall it so only Replex can talk to it) — no proxy-side feature can
+> substitute for that.
+
 ```text
 REPLEX_RESOLUTION_POLICY_ENABLED=true
 
@@ -172,6 +181,9 @@ Requirements and limitations:
   to the Plex server bypass every restriction: disable GDM, block direct
   access where possible, and set Replex as the Custom server access URL
   (see [Remote access](#remote-access-force-clients-to-use-the-proxy)).
+  See the intent note above: these limits are convenience features — for
+  hard enforcement, restricted clients must have no route to the Plex
+  origin at all.
 * Only invited shared accounts are supported. Home/managed users authenticate
   differently and are not covered.
 * This restricts which source files may be accessed, it does not transcode a

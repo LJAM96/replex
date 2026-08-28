@@ -30,6 +30,11 @@ pub(crate) fn pin_default_env(mock_host: &str) -> MutexGuard<'static, ()> {
         "REPLEX_REDIRECT_STREAMS",
         "REPLEX_HERO_ROWS",
         "REPLEX_HIDDEN_COLLECTIONS",
+        // Per-account policies and the identity endpoint are process-global;
+        // leftovers from a parallel test must never narrow another test's
+        // accounts.
+        "REPLEX_USER_RESOLUTION_POLICIES",
+        "REPLEX_IDENTITY_API_BASE",
     ] {
         std::env::remove_var(var);
     }

@@ -27,6 +27,11 @@ services:
       REPLEX_TOKEN: ${REPLEX_TOKEN}
 
       # --- per-user resolution restrictions ---
+      # NOTE: these limits are a convenience feature (bandwidth saving,
+      # device matching), NOT a security boundary. Clients that can reach
+      # the Plex server directly and hold a token the server accepts can
+      # bypass them. For hard enforcement the Plex origin must be
+      # unreachable by restricted clients.
       REPLEX_RESOLUTION_POLICY_ENABLED: "true"
       REPLEX_RESOLUTION_DEFAULT: "unlimited"
       REPLEX_RESOLUTION_POLICY_FAIL_CLOSED: "true"
@@ -41,6 +46,11 @@ services:
       REPLEX_HERO_ROWS: "home.continue"
 
       # --- transport ---
+      # Streams are redirected straight to the Plex origin for video bytes.
+      # Fine for convenience-grade resolution limits (see note above); if you
+      # ever need hard enforcement, clients must not be able to reach Plex
+      # directly — proxy streams through Replex instead and firewall the
+      # origin.
       REPLEX_REDIRECT_STREAMS: "true"
 
   cloudflared:

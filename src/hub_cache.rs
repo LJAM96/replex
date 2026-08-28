@@ -456,7 +456,13 @@ async fn warm_library_pages(client: &PlexClient, host: &str, token: &str) {
         let section_id = section.as_str();
         for start in (0..250).step_by(50) {
             let path = format!("/library/sections/{}/all?X-Plex-Container-Start={}&X-Plex-Container-Size=50", section_id, start);
-            let cache_key = format!("library:{}:{}:50:{}", section_id, start, &token[..8.min(token.len())]);
+            // Derive the disk-cache key through the same canonical function
+            // the request path uses (`routes::library_cache_key_for`), so
+            // warmed entries land where live lookups happen. The key is
+            // user-scoped: this warms the admin account's scope, which is
+            // the correct behaviour — library payloads embed per-account
+            // watch state and must never be shared across accounts.
+            let cache_key = crate::routes::library_cache_key_for(&path, Some(&token));
             if crate::disk_cache::get(&cache_key).await.is_some() {
                 continue;
             }

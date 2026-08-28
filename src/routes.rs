@@ -21,6 +21,10 @@ use salvo::http::HeaderValue;
 use salvo::http::{Request, Response, StatusCode};
 use salvo::prelude::*;
 use salvo::routing::PathFilter;
+// ResponseExt::take_bytes is used to buffer upstream bodies for the library
+// disk cache; the salvo "test" feature is unconditionally enabled in
+// Cargo.toml (utils::from_salvo_response relies on the same helper).
+use salvo::test::ResponseExt;
 use tokio::time::Duration;
 use url::Url;
 
@@ -156,8 +160,9 @@ pub fn route() -> Router {
             .push(
                 Router::new()
                     .path("/library/sections/<**rest>")
-                    .hoop(library_cache_hoop)
+                    .hoop(library_cache_lookup)
                     .hoop(proxy_for_transform)
+                    .hoop(library_cache_store)
                     .get(transform_policy_response),
             )
             .push(
@@ -345,19 +350,170 @@ impl FindOnceToken for str {
     }
 }
 
-fn library_cache_key(req: &Request) -> String {
-    let raw = req.uri().path_and_query().map(|p| p.to_string()).unwrap_or_default();
-    let token_hash = req
+/// Short hash of a token used as the user-scope component of library cache
+/// keys. Raw tokens never appear in cache keys.
+fn library_user_scope(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(token.as_bytes());
+    data_encoding::HEXLOWER.encode(&digest)[..16].to_string()
+}
+
+/// Query parameters that carry no payload identity for library requests:
+/// - `X-Plex-*` client/session metadata — everything except the container
+///   paging params, which DO define the payload;
+/// - field-trimming / cosmetic shaping params (`excludeFields`,
+///   `includeFields`, `includeGeolocation`). Cache misses fetch without
+///   these (see `normalize_library_fetch`), so every stored raw payload is
+///   a full-field superset and dropping them from keys can never serve a
+///   client a trimmed payload it did not ask for.
+///
+/// Payload-defining filters (`type`, `sort`, `genre`, `unwatched`, ...) and
+/// content-shaping flags like `excludeAllLeaves` are preserved: they change
+/// which items come back and must stay part of the key.
+fn is_library_key_noise(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower == "x-plex-container-start" || lower == "x-plex-container-size" {
+        return false;
+    }
+    lower.starts_with("x-plex-")
+        || matches!(
+            lower.as_str(),
+            "includefields" | "excludefields" | "includegeolocation"
+        )
+}
+
+/// Field-shaping params stripped from the upstream fetch on cache misses.
+/// Deliberately narrower than `is_library_key_noise`: the fetch must
+/// preserve the client's token and everything Plex itself acts on; only
+/// the response-field shaping is removed so stored payloads are supersets,
+/// matching what the warmer fetches.
+fn is_library_fetch_shaping(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "includefields" | "excludefields" | "includegeolocation"
+    )
+}
+
+/// Canonical path+query for library cache keys: client-shaping noise is
+/// stripped (`is_library_key_noise`), remaining keys are lower-cased and
+/// the pairs sorted, so the same logical request — whatever client shape
+/// it arrived in — maps to exactly one entry. Tokens never appear in keys.
+pub(crate) fn canonical_library_path(raw_path_and_query: &str) -> String {
+    match Url::parse(&format!("http://x{}", raw_path_and_query)) {
+        Ok(mut url) => {
+            let mut pairs: Vec<(String, String)> = url
+                .query_pairs()
+                .filter(|(k, _)| !is_library_key_noise(k))
+                .map(|(k, v)| (k.to_ascii_lowercase(), v.to_string()))
+                .collect();
+            pairs.sort();
+            {
+                let mut ser = url.query_pairs_mut();
+                ser.clear();
+                for (k, v) in &pairs {
+                    ser.append_pair(k, v);
+                }
+            }
+            format!("library:{}", url)
+        }
+        Err(_) => format!("library:{}", raw_path_and_query),
+    }
+}
+
+/// Strip field-shaping params from a `/library/sections` request before the
+/// upstream fetch on cache misses, so the raw payload persisted for the
+/// account's scope is a full-field superset any later request in that scope
+/// can consume (the warmer's fetches are already superset-shaped). Auth
+/// token and paging params are always preserved.
+fn normalize_library_fetch(req: &mut Request) {
+    let raw = match req.uri().path_and_query() {
+        Some(p) => p.to_string(),
+        None => return,
+    };
+    let mut url = match Url::parse(&format!("http://x{}", raw)) {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(k, _)| !is_library_fetch_shaping(k))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    {
+        let mut ser = url.query_pairs_mut();
+        ser.clear();
+        for (k, v) in &kept {
+            ser.append_pair(k, v);
+        }
+    }
+    let new = match url.query() {
+        Some(q) if !q.is_empty() => format!("{}?{}", url.path(), q),
+        _ => url.path().to_string(),
+    };
+    if let Ok(uri) = new.parse::<hyper::Uri>() {
+        req.set_uri(uri);
+    }
+}
+
+/// Build the canonical library disk-cache key for a request.
+///
+/// The key is user-scoped (hash of the requesting token): raw
+/// `/library/sections` payloads embed per-account watch state (viewCount,
+/// lastViewedAt, userRating), so one account must never be served another
+/// account's stored body.
+///
+/// The body stored under this key is the RAW upstream payload — per-user
+/// transforms (resolution policy, collection visibility) always re-run on
+/// retrieval, so a cached entry can never act as a stale authorisation
+/// decision for the account that owns it. Client-shaping noise is
+/// canonicalized away (`canonical_library_path`), so the library warmer
+/// — which builds its keys through this same function — warms entries that
+/// real client requests actually consume.
+pub(crate) fn library_cache_key_for(raw_path_and_query: &str, token: Option<&str>) -> String {
+    let scope = token
+        .map(library_user_scope)
+        .unwrap_or_else(|| "anon".to_string());
+    format!("library:u:{}:{}", scope, canonical_library_path(raw_path_and_query))
+}
+
+/// Extract the Plex token from a request: header first, then query param,
+/// since Plex clients use both interchangeably.
+fn request_token(req: &Request) -> Option<String> {
+    if let Some(v) = req
         .headers()
         .get("X-Plex-Token")
         .and_then(|v| v.to_str().ok())
-        .map(|t| &t[..8.min(t.len())])
-        .unwrap_or("anon");
-    format!("library:{}:{}", token_hash, raw)
+    {
+        return Some(v.to_string());
+    }
+    req.queries()
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("x-plex-token"))
+        .map(|(_, v)| v.clone())
 }
 
+fn library_cache_key(req: &Request) -> String {
+    let raw = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.to_string())
+        .unwrap_or_default();
+    library_cache_key_for(&raw, request_token(req).as_deref())
+}
+
+/// Disk-cache lookup for `/library/sections` responses.
+///
+/// The persisted body is the RAW upstream payload, never an already
+/// transformed one: on a hit the requesting account's CURRENT policy
+/// transforms (resolution restrictions, hidden collections) re-run before
+/// serving, so a cache entry can never carry an authorisation decision
+/// made under an old policy or for a different account between requests.
+///
+/// On a miss the upstream fetch is normalized first
+/// (`normalize_library_fetch`) so the raw payload stored for the account's
+/// scope is a full-field superset that any future client shape can consume.
 #[handler]
-async fn library_cache_hoop(
+async fn library_cache_lookup(
     req: &mut Request,
     depot: &mut Depot,
     res: &mut Response,
@@ -376,21 +532,69 @@ async fn library_cache_hoop(
         res.headers_mut()
             .insert(CONTENT_TYPE, header::HeaderValue::from_static("application/json"));
         *res.body_mut() = salvo::http::body::ResBody::Once(bytes::Bytes::from(data));
-        ctrl.skip_rest();
-        return Ok(());
-    }
-    ctrl.call_next(req, depot, res).await;
-    if res.status_code.unwrap_or(StatusCode::OK).is_success() {
-        let taken = std::mem::replace(res.body_mut(), salvo::http::body::ResBody::None);
-        if let salvo::http::body::ResBody::Once(body) = taken {
-            let bytes = body.to_vec();
-            let _ = crate::disk_cache::put(&key, &bytes).await;
-            *res.body_mut() = salvo::http::body::ResBody::Once(bytes::Bytes::from(bytes));
-        } else {
-            *res.body_mut() = taken;
+        match apply_policy_transforms(req, res).await {
+            Ok(()) => {
+                ctrl.skip_rest();
+                return Ok(());
+            }
+            Err(error) => {
+                // Corrupt/unparseable cached body: drop it and fall through
+                // to a live upstream fetch instead of failing the request.
+                tracing::warn!(
+                    error = ?error,
+                    key = %key,
+                    "cached library payload unparseable, refetching"
+                );
+                crate::disk_cache::remove(&key).await;
+            }
         }
     }
+    // Miss (or corrupt cached entry that was just evicted): normalize the
+    // fetch so every stored raw payload is a full-field superset that any
+    // future request in this account's scope can consume.
+    normalize_library_fetch(req);
+    ctrl.call_next(req, depot, res).await;
     Ok(())
+}
+
+/// Persist the RAW upstream `/library/sections` payload after the proxy
+/// fetch and BEFORE the policy transform runs in the goal handler. Storing
+/// pre-transform bodies is what keeps the disk cache from ever becoming an
+/// authorisation artifact: the stored bytes contain no decision made under
+/// any policy.
+#[handler]
+async fn library_cache_store(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+    ctrl: &mut FlowCtrl,
+) {
+    if !req.uri().path().starts_with("/library/sections/") {
+        ctrl.call_next(req, depot, res).await;
+        return;
+    }
+    if res.status_code.unwrap_or(StatusCode::OK).is_success() {
+        // The upstream body may still be streaming at this point; buffer it
+        // so we can persist the raw payload and hand a complete body to the
+        // transform goal below.
+        let bytes = match res.take_bytes(None).await {
+            Ok(b) => b,
+            Err(error) => {
+                tracing::warn!(
+                    error = ?error,
+                    "could not buffer upstream library payload for disk cache"
+                );
+                ctrl.call_next(req, depot, res).await;
+                return;
+            }
+        };
+        if !bytes.is_empty() {
+            let key = library_cache_key(req);
+            let _ = crate::disk_cache::put(&key, &bytes).await;
+            *res.body_mut() = salvo::http::body::ResBody::Once(bytes);
+        }
+    }
+    ctrl.call_next(req, depot, res).await;
 }
 
 /// Cache-aside layer for /photo/:/transcode responses.
@@ -1032,7 +1236,19 @@ pub async fn transform_policy_response(
     if status != StatusCode::OK {
         return Ok(());
     }
+    apply_policy_transforms(req, res).await
+}
 
+/// Parse the RAW upstream JSON body currently held in `res` and apply the
+/// requesting account's CURRENT policy transforms over it, then render the
+/// result. Shared by the live path (`transform_policy_response`) and the
+/// disk-cache hit path (`library_cache_lookup`) so both always transform
+/// with the current account and current configuration — a cached body is
+/// never served as an authorisation decision.
+async fn apply_policy_transforms(
+    req: &mut Request,
+    res: &mut Response,
+) -> Result<(), anyhow::Error> {
     let content_type = get_content_type_from_headers(req.headers_mut());
 
     let parse_result = from_salvo_response(res).await;
@@ -2418,5 +2634,467 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(content, "pong!");
+    }
+}
+
+/// Tests for the canonical library disk-cache keys and the
+/// raw-payload-cache/always-transform architecture.
+#[cfg(test)]
+mod library_cache_tests {
+    use super::*;
+
+    /// Exactly the path the library warmer constructs in
+    /// `hub_cache::warm_library_pages`.
+    const WARM_PATH: &str =
+        "/library/sections/6/all?X-Plex-Container-Start=0&X-Plex-Container-Size=50";
+
+    #[test]
+    fn canonical_library_path_strips_token_and_is_order_stable() {
+        let with_token = canonical_library_path(&format!("{}&X-Plex-Token=secret", WARM_PATH));
+        let no_token = canonical_library_path(WARM_PATH);
+        let reordered = canonical_library_path(
+            "/library/sections/6/all?X-Plex-Container-Size=50&X-Plex-Container-Start=0",
+        );
+        // What real Plex Web clients attach to a library browse: client
+        // metadata plus field-shaping params. None of it changes WHICH
+        // items come back, so none of it may fragment the cache.
+        let with_client_noise = canonical_library_path(&format!(
+            "{}&excludeFields=summary&includeGeolocation=1&X-Plex-Client-Identifier=pxweb",
+            WARM_PATH
+        ));
+
+        assert_eq!(with_token, no_token, "token must not influence the key");
+        assert!(!with_token.contains("secret"), "raw tokens must never appear in keys");
+        assert_eq!(no_token, reordered, "param order must not influence the key");
+        assert_eq!(
+            no_token, with_client_noise,
+            "client-shaping noise must not fragment the cache: warmed entries \
+             must be consumable by real client requests"
+        );
+
+        // Payload-defining inputs must stay in the key.
+        assert_ne!(
+            canonical_library_path(WARM_PATH),
+            canonical_library_path(
+                "/library/sections/6/all?X-Plex-Container-Start=50&X-Plex-Container-Size=50"
+            ),
+            "different pages must be distinct entries"
+        );
+        assert_ne!(
+            canonical_library_path(WARM_PATH),
+            canonical_library_path(&format!("{}&type=1", WARM_PATH)),
+            "filtered queries must be distinct entries"
+        );
+    }
+
+    #[test]
+    fn library_keys_are_user_scoped() {
+        let a1 = library_cache_key_for(WARM_PATH, Some("tokenA"));
+        let a2 = library_cache_key_for(WARM_PATH, Some("tokenA"));
+        let b = library_cache_key_for(WARM_PATH, Some("tokenB"));
+
+        assert_eq!(a1, a2, "same account must hit the same entry");
+        assert_ne!(
+            a1, b,
+            "different accounts must never share library cache entries: raw \
+             library payloads embed per-account watch state"
+        );
+        assert!(a1.starts_with("library:u:"), "library keys are always user-scoped");
+        assert!(!a1.contains("tokenA"), "raw tokens must not appear in keys");
+    }
+
+    /// The review's key finding: warmer and request path must derive
+    /// identical keys from the same request, or warmed entries land where
+    /// nothing looks them up.
+    #[test]
+    fn library_warmer_key_matches_request_path() {
+        let warmer_key = library_cache_key_for(WARM_PATH, Some("admintoken"));
+
+        // The same request as a real Plex Web client sends it: token in the
+        // header plus the usual client-metadata and field-shaping noise.
+        const CLIENT_NOISE: &str = "excludeFields=summary&includeGeolocation=1\
+            &X-Plex-Client-Identifier=pxweb&X-Plex-Platform=Safari";
+        let mut probe = salvo::http::Request::default();
+        let uri: hyper::Uri = format!("{}&{}&X-Plex-Token=admintoken", WARM_PATH, CLIENT_NOISE)
+            .parse()
+            .unwrap();
+        probe.set_uri(uri);
+        probe.headers_mut().insert(
+            "X-Plex-Token",
+            salvo::http::header::HeaderValue::from_static("admintoken"),
+        );
+        assert_eq!(
+            library_cache_key(&probe),
+            warmer_key,
+            "warmed entries must be consumable by real client requests, \
+             noise and all"
+        );
+
+        // Token sent as a query param instead of a header must produce the
+        // same key (canonical path strips it; scope comes from the value).
+        let mut probe_query_token = salvo::http::Request::default();
+        probe_query_token.set_uri(
+            format!("{}&{}&X-Plex-Token=admintoken", WARM_PATH, CLIENT_NOISE)
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(library_cache_key(&probe_query_token), warmer_key);
+
+        // A different account must not consume the warmed entry.
+        let mut probe_other = salvo::http::Request::default();
+        probe_other
+            .set_uri(format!("{}&X-Plex-Token=othertoken", WARM_PATH).parse().unwrap());
+        assert_ne!(
+            library_cache_key(&probe_other),
+            warmer_key,
+            "one account must never read another account's library payload"
+        );
+    }
+
+    /// Cache misses must fetch without field-shaping params so every stored
+    /// raw payload is a full-field superset — but the auth token and paging
+    /// must survive normalization untouched.
+    #[test]
+    fn normalize_library_fetch_preserves_auth_and_paging() {
+        let mut req = salvo::http::Request::default();
+        let raw = format!(
+            "{}&excludeFields=summary&includeGeolocation=1\
+             &X-Plex-Container-Size=50&X-Plex-Container-Start=0&X-Plex-Token=tok",
+            WARM_PATH
+        );
+        req.set_uri(raw.parse().unwrap());
+        normalize_library_fetch(&mut req);
+
+        assert_eq!(req.uri().path(), "/library/sections/6/all");
+        let query = req.uri().query().unwrap_or_default();
+        assert!(
+            query.contains("X-Plex-Token=tok"),
+            "auth token must survive normalization: {query}"
+        );
+        assert!(
+            query.contains("X-Plex-Container-Size=50")
+                && query.contains("X-Plex-Container-Start=0"),
+            "paging must survive normalization: {query}"
+        );
+        assert!(
+            !query.contains("excludeFields") && !query.contains("includeGeolocation"),
+            "field shaping must be dropped so stored payloads are supersets: {query}"
+        );
+    }
+
+    /// The review's "Monday 4K / Tuesday 1080p" scenario: a policy change
+    /// must be honoured on disk-cache hits. The stored body is the RAW
+    /// upstream payload, so the response must change when the policy does —
+    /// a cached entry is never itself an authorisation decision.
+    #[tokio::test]
+    async fn policy_change_is_honoured_on_library_disk_cache_hits() {
+        use crate::test_helpers::*;
+        use salvo::test::{ResponseExt, TestClient};
+
+        let _ = tracing_subscriber::fmt::try_init();
+        let server = httpmock::MockServer::start();
+
+        let _identity_mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/api/v2/user")
+                .header("X-Plex-Token", "fakeID");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body_from_file("tests/mock/in/identity_user.json");
+        });
+        let sections_mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/library/sections/6/all")
+                .header("X-Plex-Token", "fakeID");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{
+                        "MediaContainer": {
+                            "size": 1,
+                            "Metadata": [{
+                                "ratingKey": "100",
+                                "key": "/library/metadata/100",
+                                "title": "4K Test Movie",
+                                "type": "movie",
+                                "Media": [{
+                                    "id": 1,
+                                    "videoResolution": "4k",
+                                    "width": 3840,
+                                    "height": 2160,
+                                    "Part": [{
+                                        "id": 101,
+                                        "key": "/library/parts/100/101/file.mkv"
+                                    }]
+                                }]
+                            }]
+                        }
+                    }"#,
+                );
+        });
+
+        // Isolate the disk cache for this test.
+        let tmp = std::env::temp_dir().join(format!(
+            "replex-test-libcache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let _env = pin_default_env(&server.address().to_string());
+        std::env::set_var("REPLEX_IDENTITY_API_BASE", server.base_url());
+        std::env::set_var("REPLEX_RESOLUTION_POLICY_ENABLED", "true");
+        std::env::set_var("REPLEX_RESOLUTION_POLICY_FAIL_CLOSED", "true");
+        std::env::set_var("REPLEX_RESOLUTION_DEFAULT", "unlimited");
+        std::env::set_var("REPLEX_DISK_CACHE_DIR", &tmp);
+
+        let service = Service::new(super::route());
+        // Realistic client URL: the field-shaping/client-metadata noise a
+        // real Plex Web session attaches must not prevent disk-cache reuse.
+        let url = "http://127.0.0.1:5800/library/sections/6/all?excludeFields=summary&includeGeolocation=1&X-Plex-Client-Identifier=testclient&X-Plex-Container-Size=50&X-Plex-Container-Start=0";
+
+        // Monday: unrestricted account, 4K version is visible.
+        let content_monday = TestClient::get(url)
+            .add_header("HOST", &server.address().to_string(), true)
+            .add_header("X-Plex-Token", "fakeID", true)
+            .add_header("X-Plex-Client-Identifier", "fakeID", true)
+            .add_header("Accept", "application/json", true)
+            .send(&service)
+            .await
+            .take_string()
+            .await
+            .unwrap();
+        let monday: serde_json::Value = serde_json::from_str(&content_monday).unwrap();
+        assert_eq!(sections_mock.hits(), 1, "first request must fetch upstream");
+        assert!(
+            monday["MediaContainer"]["Metadata"]
+                .as_array()
+                .map(|m| !m.is_empty())
+                .unwrap_or(false),
+            "unrestricted account must see the item: {monday}"
+        );
+        assert!(
+            monday["MediaContainer"]["Metadata"][0]["Media"]
+                .as_array()
+                .map(|m| !m.is_empty())
+                .unwrap_or(false),
+            "unrestricted account must see the 4K media version"
+        );
+
+        // Tuesday: the policy tightens to 1080p. Same URL, same token —
+        // the response must be served from the disk cache (no second
+        // upstream fetch) AND reflect the new policy. The value is quoted
+        // so figment keeps it a string (deserialize_resolution_default
+        // rejects bare integers from env).
+        std::env::set_var("REPLEX_RESOLUTION_DEFAULT", "\"1080\"");
+
+        let content_tuesday = TestClient::get(url)
+            .add_header("HOST", &server.address().to_string(), true)
+            .add_header("X-Plex-Token", "fakeID", true)
+            .add_header("X-Plex-Client-Identifier", "fakeID", true)
+            .add_header("Accept", "application/json", true)
+            .send(&service)
+            .await
+            .take_string()
+            .await
+            .unwrap();
+        let tuesday: serde_json::Value = serde_json::from_str(&content_tuesday).unwrap();
+
+        assert_eq!(
+            sections_mock.hits(),
+            1,
+            "second request must be served from the disk cache, not upstream"
+        );
+        assert_ne!(
+            monday, tuesday,
+            "a policy change must change the served response even on a cache hit"
+        );
+        let hidden = tuesday["MediaContainer"]
+            .get("Metadata")
+            .map(|m| m.as_array().map(|a| a.is_empty()).unwrap_or(true))
+            .unwrap_or(true);
+        assert!(
+            hidden,
+            "restricted account must not see the 4K item: {tuesday}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The review's explicit P1 ask: an end-to-end cross-user test with one
+    /// unlimited account and one 1080p account. Asserts through the real
+    /// router that (a) the restricted account never sees the 4K item while
+    /// the unlimited account does, (b) the accounts never share disk-cache
+    /// entries (each fetches its own raw payload), and (c) the restricted
+    /// account's cache hits still re-apply its policy.
+    #[tokio::test]
+    async fn cross_user_library_sections_isolation() {
+        use crate::test_helpers::*;
+        use salvo::test::{ResponseExt, TestClient};
+
+        let _ = tracing_subscriber::fmt::try_init();
+        let server = httpmock::MockServer::start();
+
+        // Two verified identities, one per token.
+        let _admin_identity = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/api/v2/user")
+                .header("X-Plex-Token", "4ktoken");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id": 1, "uuid": "uuid-admin", "username": "admin"}"#);
+        });
+        let _limited_identity = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/api/v2/user")
+                .header("X-Plex-Token", "limitedtoken");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id": 2, "uuid": "uuid-limited", "username": "jodiemy3"}"#);
+        });
+        let sections_mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/library/sections/6/all");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{
+                        "MediaContainer": {
+                            "size": 1,
+                            "Metadata": [{
+                                "ratingKey": "100",
+                                "key": "/library/metadata/100",
+                                "title": "4K Test Movie",
+                                "type": "movie",
+                                "Media": [{
+                                    "id": 1,
+                                    "videoResolution": "4k",
+                                    "width": 3840,
+                                    "height": 2160,
+                                    "Part": [{
+                                        "id": 101,
+                                        "key": "/library/parts/100/101/file.mkv"
+                                    }]
+                                }]
+                            }]
+                        }
+                    }"#,
+                );
+        });
+
+        let tmp = std::env::temp_dir().join(format!(
+            "replex-test-crossuser-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let _env = pin_default_env(&server.address().to_string());
+        std::env::set_var("REPLEX_IDENTITY_API_BASE", server.base_url());
+        std::env::set_var("REPLEX_RESOLUTION_POLICY_ENABLED", "true");
+        std::env::set_var("REPLEX_RESOLUTION_POLICY_FAIL_CLOSED", "true");
+        std::env::set_var("REPLEX_RESOLUTION_DEFAULT", "unlimited");
+        std::env::set_var(
+            "REPLEX_USER_RESOLUTION_POLICIES",
+            r#"[{"username": "jodiemy3", "max_resolution": "1080"}]"#,
+        );
+        std::env::set_var("REPLEX_DISK_CACHE_DIR", &tmp);
+
+        let service = Service::new(super::route());
+        let url = "http://127.0.0.1:5800/library/sections/6/all?X-Plex-Container-Size=50&X-Plex-Container-Start=0";
+
+        async fn browse(service: &Service, url: &str, token: &str) -> serde_json::Value {
+            let content = TestClient::get(url)
+                .add_header("HOST", "127.0.0.1:5800", true)
+                .add_header("X-Plex-Token", token, true)
+                .add_header("X-Plex-Client-Identifier", "test-client", true)
+                .add_header("Accept", "application/json", true)
+                .send(service)
+                .await
+                .take_string()
+                .await
+                .unwrap();
+            serde_json::from_str(&content).unwrap()
+        }
+        let metadata = |v: &serde_json::Value| {
+            v["MediaContainer"]
+                .get("Metadata")
+                .and_then(|m| m.as_array())
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        // Unlimited account: sees the item with its 4K media version.
+        let admin = browse(&service, url, "4ktoken").await;
+        assert_eq!(sections_mock.hits(), 1, "admin request must fetch upstream");
+        assert_eq!(
+            metadata(&admin).len(),
+            1,
+            "unlimited account must see the item: {admin}"
+        );
+        assert!(
+            !metadata(&admin)[0]["Media"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .is_empty(),
+            "unlimited account must see the 4K media version"
+        );
+
+        // 1080p account: same URL — but must NOT see the 4K item, and must
+        // fetch its OWN raw payload rather than reading the admin's entry.
+        let limited = browse(&service, url, "limitedtoken").await;
+        assert_eq!(
+            sections_mock.hits(),
+            2,
+            "restricted account must use its own user-scoped cache scope, \
+             never the admin's entry"
+        );
+        assert!(
+            metadata(&limited).is_empty(),
+            "1080p account must never see the 4K item: {limited}"
+        );
+
+        // 1080p account again: served from its own disk entry (no new
+        // upstream fetch) and the restriction is still applied.
+        let limited_again = browse(&service, url, "limitedtoken").await;
+        assert_eq!(
+            sections_mock.hits(),
+            2,
+            "restricted account's repeat request must be a disk-cache hit"
+        );
+        assert!(
+            metadata(&limited_again).is_empty(),
+            "restriction must survive the restricted account's cache hit: {limited_again}"
+        );
+
+        // Unlimited account again: served from its own disk entry, still
+        // sees the full 4K item — the restricted policy never leaked into
+        // the admin's cache scope.
+        let admin_again = browse(&service, url, "4ktoken").await;
+        assert_eq!(
+            sections_mock.hits(),
+            2,
+            "unlimited account's repeat request must be a disk-cache hit"
+        );
+        assert_eq!(
+            metadata(&admin_again).len(),
+            1,
+            "admin's cache scope must be unaffected by the restricted policy: {admin_again}"
+        );
+        assert!(
+            !metadata(&admin_again)[0]["Media"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .is_empty(),
+            "admin must still see the 4K media version on cache hits"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

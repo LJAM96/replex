@@ -52,10 +52,33 @@ pub async fn put(key: &str, data: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
+    // Track overwrites correctly: subtract the previous entry's size before
+    // adding the new one so CURRENT_SIZE does not drift upwards until the
+    // next full scan.
+    if let Ok(meta) = tokio::fs::metadata(&path).await {
+        let old = meta.len();
+        let _ = CURRENT_SIZE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
+            Some(s.saturating_sub(old))
+        });
+    }
     tokio::fs::write(&path, data).await?;
     CURRENT_SIZE.fetch_add(data.len() as u64, Ordering::Relaxed);
     ensure_capacity().await;
     Ok(())
+}
+
+/// Remove a cache entry if present, keeping the tracked size consistent.
+pub async fn remove(key: &str) {
+    let path = path_for_key(key);
+    let len = match tokio::fs::metadata(&path).await {
+        Ok(m) => m.len(),
+        Err(_) => return,
+    };
+    if tokio::fs::remove_file(&path).await.is_ok() {
+        let _ = CURRENT_SIZE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
+            Some(s.saturating_sub(len))
+        });
+    }
 }
 
 async fn ensure_capacity() {
