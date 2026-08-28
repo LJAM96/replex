@@ -3,9 +3,9 @@ use anyhow::Result;
 extern crate mime;
 use itertools::Itertools;
 // use futures_util::StreamExt;
+use crate::config::Config;
 use mime::Mime;
 use multimap::MultiMap;
-use crate::config::Config;
 use salvo::prelude::*;
 use salvo::proxy::*;
 use salvo::Error;
@@ -15,87 +15,76 @@ use strum_macros::EnumString;
 // use http_body::{Limited, Full};
 use http_body_util::BodyExt;
 use percent_encoding::{utf8_percent_encode, CONTROLS};
-use url::Url;
 use tokio::time::Duration;
+use url::Url;
 use yaserde::ser::to_string as to_xml_str;
 // use salvo_core::http::response::Response as SalvoResponse;
 use salvo::http::HeaderValue;
 
 use salvo::http::HeaderMap;
 use salvo::{
-    Extractible,
-    Request as SalvoRequest,
+    test::ResponseExt, Extractible, Request as SalvoRequest,
     Response as SalvoResponse,
-    test::ResponseExt
 };
 
 use crate::models::*;
 
-pub fn url_path_getter(
-    req: &Request,
-) -> Option<String> {
+pub fn url_path_getter(req: &Request) -> Option<String> {
     Some(req.uri().path().to_string())
 }
 
-pub fn url_query_getter(
-    req: &Request,
-) -> Option<String> {
+pub fn url_query_getter(req: &Request) -> Option<String> {
     req.uri().query().map(Into::into)
 }
 
-pub fn salvo_url_path_getter(
-    req: &Request,
-    _depot: &Depot,
-) -> Option<String> {
+pub fn salvo_url_path_getter(req: &Request, _depot: &Depot) -> Option<String> {
     url_path_getter(req)
 }
 
-pub fn salvo_url_query_getter(
-    req: &Request,
-    _depot: &Depot,
-) -> Option<String> {
+pub fn salvo_url_query_getter(req: &Request, _depot: &Depot) -> Option<String> {
     url_query_getter(req)
 }
 
 // Proxy to plex instance
 pub fn default_proxy() -> Proxy<String, ReqwestClient> {
-  let config: Config = Config::figment().extract().unwrap();
-  let mut proxy = Proxy::new(
-    config.host.clone().unwrap(),
-    ReqwestClient::new(reqwest::Client::builder()
-             .timeout(Duration::from_secs(60 * 200))
-             .build()
-             .unwrap())
-  );
-  proxy = proxy.url_path_getter(salvo_url_path_getter);
-  proxy = proxy.url_query_getter(salvo_url_query_getter);
-  proxy
+    let config: Config = Config::figment().extract().unwrap();
+    let mut proxy = Proxy::new(
+        config.host.clone().unwrap(),
+        ReqwestClient::new(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(60 * 200))
+                .build()
+                .unwrap(),
+        ),
+    );
+    proxy = proxy.url_path_getter(salvo_url_path_getter);
+    proxy = proxy.url_query_getter(salvo_url_query_getter);
+    proxy
 }
 
 pub fn proxy(upstream: String) -> Proxy<String, ReqwestClient> {
-  let mut proxy = Proxy::new(
-    upstream,
-    ReqwestClient::new(reqwest::Client::builder()
-             .build()
-             .unwrap())
-  );
-  proxy = proxy.url_path_getter(salvo_url_path_getter);
-  proxy = proxy.url_query_getter(salvo_url_query_getter);
+    let mut proxy = Proxy::new(
+        upstream,
+        ReqwestClient::new(reqwest::Client::builder().build().unwrap()),
+    );
+    proxy = proxy.url_path_getter(salvo_url_path_getter);
+    proxy = proxy.url_query_getter(salvo_url_query_getter);
 
-  proxy
+    proxy
 }
 
 //pub fn proxy_request()
 
+/// Development-only debugging proxy. Only compiled into debug builds; the
+/// matching route is gated with `#[cfg(debug_assertions)]` in `routes.rs`.
+#[cfg(debug_assertions)]
 pub fn test_proxy(upstream: String) -> Proxy<String, ReqwestClient> {
-  let mut proxy = Proxy::new(
-    upstream,
-    ReqwestClient::new(reqwest::Client::builder()
-             .build()
-             .unwrap())
-  );
-  
-  proxy
+    let mut proxy = Proxy::new(
+        upstream,
+        ReqwestClient::new(reqwest::Client::builder().build().unwrap()),
+    );
+
+    proxy
 }
 
 /// Encode url path. This can be used when build your custom url path getter.

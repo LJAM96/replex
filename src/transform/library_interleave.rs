@@ -1,9 +1,5 @@
-use crate::{
-    config::Config,
-    models::*,
-    plex_client::{PlexClient},
-};
 use super::Transform;
+use crate::{config::Config, models::*, plex_client::PlexClient};
 use async_trait::async_trait;
 use itertools::Itertools;
 
@@ -38,12 +34,12 @@ impl Transform for LibraryInterleaveTransform {
                 )
                 .await
                 .unwrap();
-        
+
             //match c {
             //    Ok(v) =>,
             //    Err(err) =>
             //}
-        
+
             let mut c = plex_client
                 .clone()
                 .get_cached(
@@ -59,13 +55,12 @@ impl Transform for LibraryInterleaveTransform {
                 )
                 .await
                 .unwrap();
-            
+
             // should have proper errors but lets assume not found so no access
             //match c {
             //    Ok(v) =>,
             //    Err(err) =>
             //}
-
 
             if collection.media_container.exclude_watched() {
                 c.media_container.children_mut().retain(|x| !x.is_watched());

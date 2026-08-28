@@ -1,5 +1,5 @@
 use httpmock::prelude::*;
-use replex::models::{PlexContext};
+use replex::models::PlexContext;
 use replex::plex_client::{IdentityError, PlexClient};
 
 fn client_for(token: Option<&str>) -> PlexClient {
@@ -75,10 +75,9 @@ async fn identity_resolution_scenarios() {
     let client = client_for(Some("bad-token"));
     match client.get_current_user().await {
         Err(IdentityError::InvalidToken) => {}
-        other => panic!(
-            "expected InvalidToken, got {:?}",
-            other.map(|i| i.username)
-        ),
+        other => {
+            panic!("expected InvalidToken, got {:?}", other.map(|i| i.username))
+        }
     }
     assert_eq!(bad_mock.hits(), 1);
 
@@ -95,10 +94,9 @@ async fn identity_resolution_scenarios() {
     let client = client_for(None);
     match client.get_current_user().await {
         Err(IdentityError::MissingToken) => {}
-        other => panic!(
-            "expected MissingToken, got {:?}",
-            other.map(|i| i.username)
-        ),
+        other => {
+            panic!("expected MissingToken, got {:?}", other.map(|i| i.username))
+        }
     }
     assert_eq!(unused_mock.hits(), 0);
 

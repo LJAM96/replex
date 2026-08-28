@@ -61,18 +61,21 @@ static IDENTITY_CACHE: Lazy<Cache<String, UserIdentity>> = Lazy::new(|| {
 /// authorise a different account that is restricted to 1080p.
 pub type PartPolicyKey = (String, String, i64);
 
-pub static PART_POLICY_CACHE: Lazy<Cache<PartPolicyKey, bool>> = Lazy::new(|| {
-    let c: Config = Config::figment().extract().unwrap();
-    Cache::builder()
-        .max_capacity(100_000)
-        .time_to_live(Duration::from_secs(c.identity_cache_ttl))
-        .build()
-});
+pub static PART_POLICY_CACHE: Lazy<Cache<PartPolicyKey, bool>> =
+    Lazy::new(|| {
+        let c: Config = Config::figment().extract().unwrap();
+        Cache::builder()
+            .max_capacity(100_000)
+            .time_to_live(Duration::from_secs(c.identity_cache_ttl))
+            .build()
+    });
 
 /// Stable fingerprint of every policy input that `media_allowed` consults.
 /// Keep this in sync with `media_allowed`: if it ever reads more policy
 /// fields, they must be folded in here.
-pub fn part_policy_fingerprint(policy: &crate::resolution_policy::ResolutionPolicy) -> String {
+pub fn part_policy_fingerprint(
+    policy: &crate::resolution_policy::ResolutionPolicy,
+) -> String {
     format!("{:?}", policy.limit)
 }
 
@@ -130,11 +133,8 @@ fn hash_token(token: &str) -> String {
 /// Cached machineIdentifier of the upstream Plex server, keyed by upstream
 /// host, used to recognise which resource entry in a shared user's
 /// plex.tv resources list is ours.
-static SERVER_MACHINE_IDS: Lazy<Cache<String, String>> = Lazy::new(|| {
-    Cache::builder()
-        .max_capacity(10)
-        .build()
-});
+static SERVER_MACHINE_IDS: Lazy<Cache<String, String>> =
+    Lazy::new(|| Cache::builder().max_capacity(10).build());
 
 struct Retry401;
 impl RetryableStrategy for Retry401 {
@@ -468,7 +468,9 @@ impl PlexClient {
                 }
                 // plex.tv rejects some device-scoped shared tokens outright;
                 // match the token against the admin's shared-server list.
-                if let Some(identity) = self.resolve_via_shared_servers(token).await? {
+                if let Some(identity) =
+                    self.resolve_via_shared_servers(token).await?
+                {
                     return Ok(identity);
                 }
                 // Last resort for clients whose tokens are opaque to
@@ -477,11 +479,8 @@ impl PlexClient {
                 // because it is spoofable by anyone with server access.
                 let config: Config = Config::figment().extract().unwrap();
                 if config.allow_username_fallback {
-                    if let Some(username) = self
-                        .context
-                        .username
-                        .clone()
-                        .filter(|u| !u.is_empty())
+                    if let Some(username) =
+                        self.context.username.clone().filter(|u| !u.is_empty())
                     {
                         tracing::warn!(
                             username = %username,
@@ -500,7 +499,8 @@ impl PlexClient {
                 // map is the only reliable identity source for them.
                 let config: Config = Config::figment().extract().unwrap();
                 if let Some(cid) = &self.context.client_identifier {
-                    if let Some(username) = config.client_identity_map.get(cid) {
+                    if let Some(username) = config.client_identity_map.get(cid)
+                    {
                         tracing::warn!(
                             username = %username,
                             client_id = %cid,
@@ -566,18 +566,25 @@ impl PlexClient {
             .extract::<Config>()
             .map(|c| c.identity_api_base())
             .unwrap_or_else(|_| "https://plex.tv".to_string());
-        let url = format!("{base}/api/v2/resources?includeHttps=1&includeRelay=0");
+        let url =
+            format!("{base}/api/v2/resources?includeHttps=1&includeRelay=0");
         let mut headers = header::HeaderMap::new();
         headers.insert(
             "X-Plex-Token",
-            header::HeaderValue::from_str(token)
-                .map_err(|e| IdentityError::Upstream(anyhow::anyhow!("bad token header: {e}")))?,
+            header::HeaderValue::from_str(token).map_err(|e| {
+                IdentityError::Upstream(anyhow::anyhow!(
+                    "bad token header: {e}"
+                ))
+            })?,
         );
         headers.insert(
             "X-Plex-Client-Identifier",
             self.client_identifier_header(),
         );
-        headers.insert(ACCEPT, header::HeaderValue::from_static("application/json"));
+        headers.insert(
+            ACCEPT,
+            header::HeaderValue::from_static("application/json"),
+        );
 
         tracing::debug!(url = %url, "Shared-token resources lookup");
         let res = self
@@ -586,7 +593,11 @@ impl PlexClient {
             .headers(headers)
             .send()
             .await
-            .map_err(|e| IdentityError::Upstream(anyhow::anyhow!("resources request failed: {e}")))?;
+            .map_err(|e| {
+                IdentityError::Upstream(anyhow::anyhow!(
+                    "resources request failed: {e}"
+                ))
+            })?;
         tracing::debug!(status = %res.status(), "Shared-token resources response");
 
         match res.status() {
@@ -619,7 +630,9 @@ impl PlexClient {
         }
 
         let resources: Vec<RawResource> = res.json().await.map_err(|e| {
-            IdentityError::Upstream(anyhow::anyhow!("resources response parse failed: {e}"))
+            IdentityError::Upstream(anyhow::anyhow!(
+                "resources response parse failed: {e}"
+            ))
         })?;
 
         tracing::debug!(
@@ -629,8 +642,12 @@ impl PlexClient {
             "Shared-token resources scan"
         );
         for r in resources {
-            let is_ours = r.client_identifier.as_deref() == Some(machine_id.as_str())
-                && r.provides.as_deref().map(|p| p.contains("server")).unwrap_or(false);
+            let is_ours = r.client_identifier.as_deref()
+                == Some(machine_id.as_str())
+                && r.provides
+                    .as_deref()
+                    .map(|p| p.contains("server"))
+                    .unwrap_or(false);
             if !is_ours {
                 continue;
             }
@@ -677,7 +694,9 @@ impl PlexClient {
     ) -> Result<Option<UserIdentity>, IdentityError> {
         let config: Config = Config::figment().extract().unwrap();
         let Some(admin_token) = config.token.clone() else {
-            tracing::debug!("shared-servers lookup skipped: no admin token configured");
+            tracing::debug!(
+                "shared-servers lookup skipped: no admin token configured"
+            );
             return Ok(None);
         };
         let machine_id = self.server_machine_id().await?;
@@ -710,12 +729,15 @@ impl PlexClient {
         // Scan each entry and match on the access token.
         let body = res.text().await.unwrap_or_default();
         for tag in body.split("<SharedServer ").skip(1) {
-            let attrs = Self::parse_xml_attrs(tag.split('>').next().unwrap_or(""));
+            let attrs =
+                Self::parse_xml_attrs(tag.split('>').next().unwrap_or(""));
             let entry_token = attrs.get("accessToken").map(|s| s.as_str());
             if entry_token != Some(token) {
                 continue;
             }
-            let Some(username) = attrs.get("username").filter(|u| !u.is_empty()) else {
+            let Some(username) =
+                attrs.get("username").filter(|u| !u.is_empty())
+            else {
                 continue;
             };
             tracing::info!(
@@ -764,8 +786,9 @@ impl PlexClient {
             .clone()
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "replex-resolution-proxy".to_string());
-        header::HeaderValue::from_str(&value)
-            .unwrap_or(header::HeaderValue::from_static("replex-resolution-proxy"))
+        header::HeaderValue::from_str(&value).unwrap_or(
+            header::HeaderValue::from_static("replex-resolution-proxy"),
+        )
     }
 
     async fn server_machine_id(&self) -> Result<String, IdentityError> {
@@ -785,7 +808,11 @@ impl PlexClient {
             .headers(headers)
             .send()
             .await
-            .map_err(|e| IdentityError::Upstream(anyhow::anyhow!("server root request failed: {e}")))?;
+            .map_err(|e| {
+                IdentityError::Upstream(anyhow::anyhow!(
+                    "server root request failed: {e}"
+                ))
+            })?;
 
         #[derive(Debug, serde::Deserialize)]
         struct RawRoot {
@@ -805,11 +832,15 @@ impl PlexClient {
                 error = %e,
                 "server root parse failed"
             );
-            IdentityError::Upstream(anyhow::anyhow!("server root parse failed: {e}"))
+            IdentityError::Upstream(anyhow::anyhow!(
+                "server root parse failed: {e}"
+            ))
         })?;
 
         let id = root.container.machine_identifier;
-        SERVER_MACHINE_IDS.insert(self.host.clone(), id.clone()).await;
+        SERVER_MACHINE_IDS
+            .insert(self.host.clone(), id.clone())
+            .await;
         Ok(id)
     }
 
@@ -944,16 +975,22 @@ impl PlexClient {
     }
 
     fn generate_cache_key(&self, name: String) -> String {
-        format!("{}:{}", name, self.context.token.clone().unwrap())
+        format!(
+            "{}:{}",
+            name,
+            self.context.token.clone().unwrap_or_default()
+        )
     }
 
-    pub fn from_context(context: &PlexContext) -> Self {
-        let config: Config = Config::figment().extract().unwrap();
+    pub fn from_context(context: &PlexContext) -> Result<Self, anyhow::Error> {
+        let config: Config = Config::figment().extract().map_err(|e| {
+            anyhow::anyhow!("invalid replex configuration: {e}")
+        })?;
         let token = context
-            .clone()
             .token
-            .expect("Expected to have an token in header or query");
-        let client_identifier = context.clone().client_identifier;
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("missing Plex token on request"))?;
+        let client_identifier = context.client_identifier.clone();
         let platform = context.platform.clone().unwrap_or_default();
 
         //let req_headers = req.headers().clone();
@@ -998,11 +1035,10 @@ impl PlexClient {
         ]);
 
         for (key, val) in headers_map {
-            if val.is_some() {
-                headers.insert(
-                    key.clone(),
-                    val.unwrap().as_str().parse().unwrap(),
-                );
+            if let Some(v) = val {
+                if let Ok(hv) = header::HeaderValue::from_str(&v) {
+                    headers.insert(key.clone(), hv);
+                }
             }
         }
 
@@ -1014,26 +1050,32 @@ impl PlexClient {
         //    header::HeaderValue::from_str(&target_host).unwrap(),
         //);
 
-        Self {
-            http_client: reqwest_middleware::ClientBuilder::new(
-                reqwest::Client::builder()
-                    //.default_headers(headers)
-                    .gzip(true)
-                    // Large libraries can exceed 30s on section queries;
-                    // the outer request timeout is 200s so stay under it.
-                    .timeout(Duration::from_secs(120))
-                    .build()
-                    .unwrap(),
-            )
-            .build(),
+        let http_client = reqwest_middleware::ClientBuilder::new(
+            reqwest::Client::builder()
+                //.default_headers(headers)
+                .gzip(true)
+                // Large libraries can exceed 30s on section queries;
+                // the outer request timeout is 200s so stay under it.
+                .timeout(Duration::from_secs(120))
+                .build()
+                .map_err(|e| {
+                    anyhow::anyhow!("failed to build http client: {e}")
+                })?,
+        )
+        .build();
+
+        Ok(Self {
+            http_client,
             default_headers: headers,
-            host: config.host.unwrap(),
+            host: config.host.ok_or_else(|| {
+                anyhow::anyhow!("REPLEX_HOST is not configured")
+            })?,
             context: context.clone(),
             //x_plex_token: token,
             //x_plex_client_identifier: client_identifier,
             //x_plex_platform: platform,
             cache: CACHE.clone(),
-        }
+        })
     }
 
     // pub fn dummy() -> Self {

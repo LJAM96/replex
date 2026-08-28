@@ -1,17 +1,11 @@
-use crate::{
-    models::*,
-    plex_client::{PlexClient},
-};
+use crate::{models::*, plex_client::PlexClient};
 
-use super::Transform;
-use super::MediaStyleTransform;
-use super::ClientHeroStyle;
 use super::hero_meta;
+use super::ClientHeroStyle;
+use super::MediaStyleTransform;
+use super::Transform;
 use async_trait::async_trait;
-use futures_util::{
-    stream::{FuturesOrdered},
-    StreamExt,
-};
+use futures_util::{stream::FuturesOrdered, StreamExt};
 
 /// Collections can be called from hubs as a refresh. But also standalone.
 /// We need to know if if its hub called and if the hub is hero styled for media.

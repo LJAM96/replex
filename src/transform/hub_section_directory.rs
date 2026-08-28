@@ -1,8 +1,5 @@
-use crate::{
-    models::*,
-    plex_client::{PlexClient},
-};
 use super::Transform;
+use crate::{models::*, plex_client::PlexClient};
 use async_trait::async_trait;
 
 #[derive(Default, Debug)]

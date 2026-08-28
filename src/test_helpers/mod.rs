@@ -44,69 +44,73 @@ pub(crate) fn pin_default_env(mock_host: &str) -> MutexGuard<'static, ()> {
 pub(crate) fn get_mock_server() -> &'static MockServer {
     MOCK_SERVER.get_or_init(|| {
         let mock_server = MockServer::start();
-    let _ = mock_server.mock(|when, then| {
-        when.method(GET)
-            .path("/hubs/sections/6")
-            .header("X-Plex-Token", "fakeID")
-            .header("X-Plex-Client-Identifier", "fakeID");
-        then.status(200)
-            .header("content-type", "application/json")
-            .body_from_file("tests/mock/in/hubs_sections_6.json");
-    });
+        let _ = mock_server.mock(|when, then| {
+            when.method(GET)
+                .path("/hubs/sections/6")
+                .header("X-Plex-Token", "fakeID")
+                .header("X-Plex-Client-Identifier", "fakeID");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body_from_file("tests/mock/in/hubs_sections_6.json");
+        });
 
-    let _ = mock_server.mock(|when, then| {
-        when.method(GET)
-            .path("/library/sections/6/collections")
-            .header("X-Plex-Token", "fakeID")
-            .header("X-Plex-Client-Identifier", "fakeID");
-        then.status(200)
-            .header("content-type", "application/json")
-            .body_from_file("tests/mock/in/library_sections_6_collections.json");
-    });
+        let _ = mock_server.mock(|when, then| {
+            when.method(GET)
+                .path("/library/sections/6/collections")
+                .header("X-Plex-Token", "fakeID")
+                .header("X-Plex-Client-Identifier", "fakeID");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body_from_file(
+                    "tests/mock/in/library_sections_6_collections.json",
+                );
+        });
 
-    let _ = mock_server.mock(|when, then| {
-        when.method(GET)
-            .path("/library/collections/254688")
-            .header("X-Plex-Token", "fakeID")
-            .header("X-Plex-Client-Identifier", "fakeID");
-        then.status(200)
-            .header("content-type", "application/json")
-            .body_from_file("tests/mock/in/library_collections_254688.json");
-    });
-    
-    let _ = mock_server.mock(|when, then| {
-        when.method(GET)
-            .path("/hubs/home")
-            .header("X-Plex-Token", "fakeID")
-            .header("X-Plex-Client-Identifier", "fakeID");
-        // Recent PMS versions removed /hubs/home entirely.
-        then.status(404);
-    });
+        let _ = mock_server.mock(|when, then| {
+            when.method(GET)
+                .path("/library/collections/254688")
+                .header("X-Plex-Token", "fakeID")
+                .header("X-Plex-Client-Identifier", "fakeID");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body_from_file(
+                    "tests/mock/in/library_collections_254688.json",
+                );
+        });
 
-    // Serves the /hubs/home -> /hubs/promoted fallback fetch. Matches any
-    // promoted request without contentDirectoryID params; the stricter
-    // promoted mock below takes precedence for requests that have them.
-    let _ = mock_server.mock(|when, then| {
-        when.method(GET)
-            .path("/hubs/promoted")
-            .header("X-Plex-Token", "fakeID")
-            .header("X-Plex-Client-Identifier", "fakeID");
-        then.status(200)
-            .header("content-type", "application/json")
-            .body_from_file("tests/mock/in/hubs_promoted_6_7.json");
-    });
+        let _ = mock_server.mock(|when, then| {
+            when.method(GET)
+                .path("/hubs/home")
+                .header("X-Plex-Token", "fakeID")
+                .header("X-Plex-Client-Identifier", "fakeID");
+            // Recent PMS versions removed /hubs/home entirely.
+            then.status(404);
+        });
 
-    let _ = mock_server.mock(|when, then| {
-        when.method(GET)
-            .path("/hubs/promoted")
-            .header("X-Plex-Token", "fakeID")
-            .header("X-Plex-Client-Identifier", "fakeID")
-            .query_param("pinnedContentDirectoryID", "6,7")
-            .query_param("contentDirectoryID", "6,7");
-        then.status(200)
-            .header("content-type", "application/json")
-            .body_from_file("tests/mock/in/hubs_promoted_6_7.json");
-    });
+        // Serves the /hubs/home -> /hubs/promoted fallback fetch. Matches any
+        // promoted request without contentDirectoryID params; the stricter
+        // promoted mock below takes precedence for requests that have them.
+        let _ = mock_server.mock(|when, then| {
+            when.method(GET)
+                .path("/hubs/promoted")
+                .header("X-Plex-Token", "fakeID")
+                .header("X-Plex-Client-Identifier", "fakeID");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body_from_file("tests/mock/in/hubs_promoted_6_7.json");
+        });
+
+        let _ = mock_server.mock(|when, then| {
+            when.method(GET)
+                .path("/hubs/promoted")
+                .header("X-Plex-Token", "fakeID")
+                .header("X-Plex-Client-Identifier", "fakeID")
+                .query_param("pinnedContentDirectoryID", "6,7")
+                .query_param("contentDirectoryID", "6,7");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body_from_file("tests/mock/in/hubs_promoted_6_7.json");
+        });
 
         mock_server
     })

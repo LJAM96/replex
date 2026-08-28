@@ -1,10 +1,7 @@
-use crate::{
-    models::*,
-    plex_client::{PlexClient},
-};
-use super::Transform;
-use super::ClientHeroStyle;
 use super::hero_meta;
+use super::ClientHeroStyle;
+use super::Transform;
+use crate::{models::*, plex_client::PlexClient};
 use async_trait::async_trait;
 
 pub struct MediaStyleTransform {
@@ -37,23 +34,28 @@ impl Transform for MediaStyleTransform {
                 item.r#type = style_def.child_type.clone().unwrap();
             }
 
-            let cover_art = if let Some(custom_url) = item.get_label_value("REPLEXHEROURL") {
+            let cover_art = if let Some(custom_url) =
+                item.get_label_value("REPLEXHEROURL")
+            {
                 Some(custom_url)
             } else {
                 let mut guid = item.guid.clone().unwrap();
-                if guid.starts_with("plex://episode") && item.parent_guid.is_some() {
+                if guid.starts_with("plex://episode")
+                    && item.parent_guid.is_some()
+                {
                     guid = item.parent_guid.clone().unwrap();
                 }
                 guid = guid.replace("plex://", "");
 
-                Some(format!("{}://{}/replex/image/hero/{}?X-Plex-Token={}",
+                Some(format!(
+                    "{}://{}/replex/image/hero/{}?X-Plex-Token={}",
                     match options.forwarded_proto.clone() {
                         Some(v) => v,
-                        None => "http".to_string()
+                        None => "http".to_string(),
                     },
                     match options.forwarded_host.clone() {
                         Some(v) => v,
-                        None => options.host.clone().unwrap()
+                        None => options.host.clone().unwrap(),
                     },
                     guid,
                     options.token.clone().unwrap()

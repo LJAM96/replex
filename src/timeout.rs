@@ -18,7 +18,13 @@ impl Timeout {
 #[async_trait]
 impl Handler for Timeout {
     #[inline]
-    async fn handle(&self, req: &mut Request, depot: &mut Depot, res: &mut Response, ctrl: &mut FlowCtrl) {
+    async fn handle(
+        &self,
+        req: &mut Request,
+        depot: &mut Depot,
+        res: &mut Response,
+        ctrl: &mut FlowCtrl,
+    ) {
         tokio::select! {
             _ = ctrl.call_next(req, depot, res) => {},
             _ = tokio::time::sleep(self.value) => {

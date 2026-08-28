@@ -5,9 +5,9 @@ use std::string::ToString;
 
 extern crate mime;
 use crate::config::*;
+use crate::headers;
 use crate::plex_client::PlexClient;
 use crate::utils::*;
-use crate::headers;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_aux::prelude::{
@@ -19,7 +19,7 @@ use salvo::http::ReqBody;
 use salvo::http::ResBody;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::serde_as;
-use std::io::{Write};
+use std::io::Write;
 use strum_macros::Display as EnumDisplay;
 use strum_macros::EnumString;
 use xml::writer::XmlEvent;
@@ -52,7 +52,7 @@ pub enum Style {
     #[serde(rename = "hero")]
     Hero,
     #[serde(rename = "shelf")]
-    Shelf
+    Shelf,
 }
 
 fn default_as_false() -> bool {
@@ -98,7 +98,7 @@ pub struct Resolution {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
-pub struct PlexContextProduct { 
+pub struct PlexContextProduct {
     #[serde(default, rename(deserialize = "x-plex-product"))]
     pub product: Option<String>,
 }
@@ -128,20 +128,35 @@ pub struct PlexContext {
     pub screen_resolution: Vec<Resolution>,
     #[salvo(extract(rename = "X-Plex-Device-Screen-Resolution"))]
     pub screen_resolution_original: Option<String>,
-    #[salvo(extract(rename = "X-Plex-Client-Capabilities", alias = "x-plex-client-capabilities"))]
-    pub client_capabilities: Option<String>, 
+    #[salvo(extract(
+        rename = "X-Plex-Client-Capabilities",
+        alias = "x-plex-client-capabilities"
+    ))]
+    pub client_capabilities: Option<String>,
     #[salvo(extract(rename = "X-Plex-Product"))]
     pub product: Option<String>,
     #[salvo(extract(rename = "X-Plex-Version"))]
     pub version: Option<String>,
     pub count: Option<i32>,
-    #[salvo(extract(rename = "X-Plex-Client-Identifier", alias = "x-plex-client-identifier"))]
+    #[salvo(extract(
+        rename = "X-Plex-Client-Identifier",
+        alias = "x-plex-client-identifier"
+    ))]
     pub client_identifier: Option<String>,
-    #[salvo(extract(rename = "X-Plex-Session-Id", alias = "x-plex-session-id"))]
+    #[salvo(extract(
+        rename = "X-Plex-Session-Id",
+        alias = "x-plex-session-id"
+    ))]
     pub session_id: Option<String>,
-    #[salvo(extract(rename = "X-Plex-Session-Identifier", alias = "x-plex-session-identifier"))]
+    #[salvo(extract(
+        rename = "X-Plex-Session-Identifier",
+        alias = "x-plex-session-identifier"
+    ))]
     pub session_identifier: Option<String>,
-    #[salvo(extract(rename = "X-Plex-Playback-Session-Id", alias = "x-plex-playback-session-id"))]
+    #[salvo(extract(
+        rename = "X-Plex-Playback-Session-Id",
+        alias = "x-plex-playback-session-id"
+    ))]
     pub playback_session_id: Option<String>,
     #[salvo(extract(rename = "X-Plex-Playback-Id"))]
     pub playback_id: Option<String>,
@@ -179,7 +194,10 @@ pub struct PlexContext {
     pub real_ip: Option<String>,
     #[salvo(extract(rename = "X-Forwarded-For", alias = "x-forwarded-for"))]
     pub forwarded_for: Option<String>,
-    #[salvo(extract(rename = "X-Forwarded-Proto", alias = "x-forwared-proto"))]
+    #[salvo(extract(
+        rename = "X-Forwarded-Proto",
+        alias = "x-forwared-proto"
+    ))]
     pub forwarded_proto: Option<String>,
     #[salvo(extract(rename = "X-Forwarded-Host", alias = "x-forwared-host"))]
     pub forwarded_host: Option<String>,
@@ -202,7 +220,6 @@ pub struct PlexContext {
     pub height: Option<i32>,
     pub quality: Option<i32>,
     pub url: Option<String>,
-
     // this our own fields
     // pub style: Option<Style>,
 }
@@ -286,18 +303,26 @@ where
                 .chars()
                 .filter(|c| c.is_numeric() || *c == 'x' || *c == ',')
                 .collect();
-            let r: Vec<Resolution> = cleaned_string
-                .split(',')
-                .map(|s| {
-                    let k: Vec<i64> =
-                        s.split("x").map(|s| s.parse().unwrap()).collect();
-                    Resolution {
-                        width: k[0],
-                        height: k[1],
-                    }
-                })
-                .collect();
-            Ok(r)
+            let mut resolutions = Vec::new();
+            for part in cleaned_string.split(',') {
+                if part.is_empty() {
+                    continue;
+                }
+                let mut dims = part.split('x');
+                let (Some(width), Some(height)) = (dims.next(), dims.next())
+                else {
+                    // Malformed entry (no "x" or too many parts): ignore it
+                    // rather than panicking on out-of-range indexing.
+                    continue;
+                };
+                let (Ok(width), Ok(height)) =
+                    (width.parse::<i64>(), height.parse::<i64>())
+                else {
+                    continue;
+                };
+                resolutions.push(Resolution { width, height });
+            }
+            Ok(resolutions)
         }
         None => Ok(vec![]),
     }
@@ -540,7 +565,6 @@ pub struct Tag {
     #[yaserde(attribute)]
     tag: String,
 }
-
 
 #[derive(
     Debug,
@@ -1207,13 +1231,25 @@ pub struct MetaData {
         rename = "playQueueItemID"
     )]
     pub play_queue_item_id: Option<i64>,
-    #[serde(rename = "Collection", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "Collection",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     #[yaserde(rename = "Collection", default, child)]
     pub collections: Vec<Tag>,
-    #[serde(rename = "Country", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "Country",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     #[yaserde(rename = "Country", default, child)]
     pub countries: Vec<Tag>,
-    #[serde(rename = "Director", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "Director",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     #[yaserde(rename = "Director", default, child)]
     pub directors: Vec<Tag>,
     #[serde(rename = "Genre", default, skip_serializing_if = "Vec::is_empty")]
@@ -1352,24 +1388,27 @@ impl MetaData {
             .unwrap()
             .has_label("REPLEXHERO".to_string()))
     }
-    
-    // view_count stays for show even when marked unwatched. 
+
+    // view_count stays for show even when marked unwatched.
     pub fn is_watched(&self) -> bool {
         // movie or episode
-        if self.leaf_count.is_none() && self.view_count.is_some() && self.view_count.unwrap_or_default() > 0
+        if self.leaf_count.is_none()
+            && self.view_count.is_some()
+            && self.view_count.unwrap_or_default() > 0
         {
             return true;
         }
-        
+
         // show
         if self.viewed_leaf_count.is_some()
-            && self.leaf_count.unwrap_or_default() == self.viewed_leaf_count.unwrap()
+            && self.leaf_count.unwrap_or_default()
+                == self.viewed_leaf_count.unwrap()
         {
             return true;
         }
         false
     }
-    
+
     // check if we should excluse watched items for this hub
     pub async fn exclude_watched(
         &self,
@@ -1379,7 +1418,7 @@ impl MetaData {
         if !self.is_collection_hub() {
             return Ok(config.exclude_watched);
         }
-        
+
         let collection = plex_client
             .clone()
             .get_cached(
@@ -1565,7 +1604,7 @@ pub struct MediaContainer {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        rename = "directPlayDecisionText",
+        rename = "directPlayDecisionText"
     )]
     pub direct_play_decision_text: Option<String>,
     #[yaserde(attribute, rename = "generalDecisionCode")]
@@ -1580,14 +1619,14 @@ pub struct MediaContainer {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        rename = "generalDecisionText",
+        rename = "generalDecisionText"
     )]
     pub general_decision_text: Option<String>,
     #[yaserde(attribute, rename = "resourceSession")]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        rename = "resourceSession",
+        rename = "resourceSession"
     )]
     pub resource_session: Option<String>,
     #[yaserde(attribute, rename = "transcodeDecisionCode")]
@@ -1602,7 +1641,7 @@ pub struct MediaContainer {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        rename = "transcodeDecisionText",
+        rename = "transcodeDecisionText"
     )]
     pub transcode_decision_text: Option<String>,
 
@@ -1789,7 +1828,6 @@ impl MediaContainerWrapper<MediaContainer> {
         self.is_hub() && self.media_container.library_section_id.is_some()
     }
 }
-
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

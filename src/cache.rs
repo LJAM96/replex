@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use moka::future::Cache as MokaCache;
 //use moka::sync::Cache as MokaCacheSync;
 //use moka::sync::CacheBuilder as MokaCacheBuilder;
-use moka::Expiry;
 use crate::headers;
+use moka::Expiry;
 use once_cell::sync::Lazy;
 use salvo::cache::CachedBody;
 use salvo::cache::MethodSkipper;
@@ -13,7 +13,7 @@ use salvo::http::StatusCode;
 use salvo::Handler;
 use salvo::{cache::CacheIssuer, Depot, Request};
 use serde::de::DeserializeOwned;
-use serde::{Serialize};
+use serde::Serialize;
 use std::borrow::Borrow;
 use std::error::Error as StdError;
 use std::hash::Hash;
@@ -251,7 +251,11 @@ impl CacheIssuer for RequestIssuer {
     type Key = String;
     //async fn issue(&self, req: &mut Request, depot: &Depot) -> Option<Self::Key> {
     //async fn issue(&self, req: &mut Request, depot: &Depot) -> Option<Self::Key> {
-    async fn issue(&self, req: &mut Request, _depot: &Depot) -> Option<Self::Key> {
+    async fn issue(
+        &self,
+        req: &mut Request,
+        _depot: &Depot,
+    ) -> Option<Self::Key> {
         let mut key = String::new();
         // key.push_str("uri::http://"); // always http as we use local addr
         if self.use_scheme {
@@ -275,7 +279,7 @@ impl CacheIssuer for RequestIssuer {
         }
         if self.use_path {
             // strip last segment of an path. Used for paths that include tokens
-            if self.path_strip_last_segment{
+            if self.path_strip_last_segment {
                 // let re = Regex::new(format!(r"{}", self.path_regex.clone().unwrap()).as_str()).unwrap();
                 // req.uri().path()
                 //let k = req.uri().path().split('/').iter().join("/");
@@ -306,7 +310,7 @@ impl CacheIssuer for RequestIssuer {
             for header in self.use_headers.iter() {
                 if req.headers().contains_key(header) {
                     key.push_str("::");
-                    if header == http::header::ACCEPT {                   
+                    if header == http::header::ACCEPT {
                         if let Some(i) = req.first_accept() {
                             key.push_str(i.to_string().as_str());
                         }
@@ -322,7 +326,6 @@ impl CacheIssuer for RequestIssuer {
         Some(key)
     }
 }
-
 
 #[async_trait]
 pub trait CacheStore: Send + Sync + 'static {
@@ -343,7 +346,6 @@ pub trait CacheStore: Send + Sync + 'static {
     ) -> Result<(), Self::Error>;
 }
 
-
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct CachedEntry {
@@ -359,7 +361,7 @@ pub struct CachedEntry {
     pub req_headers: HeaderMap,
     pub req_uri: salvo::http::uri::Uri,
     pub req_method: salvo::http::method::Method,
-    pub req_local_addr: salvo::conn::addr::SocketAddr
+    pub req_local_addr: salvo::conn::addr::SocketAddr,
 }
 impl CachedEntry {
     /// Create a new `CachedEntry`.
@@ -370,7 +372,7 @@ impl CachedEntry {
         req_headers: HeaderMap,
         req_uri: salvo::http::uri::Uri,
         req_method: salvo::http::method::Method,
-        req_local_addr: salvo::conn::addr::SocketAddr
+        req_local_addr: salvo::conn::addr::SocketAddr,
     ) -> Self {
         Self {
             status,
@@ -379,7 +381,7 @@ impl CachedEntry {
             req_headers,
             req_uri,
             req_method,
-            req_local_addr
+            req_local_addr,
         }
     }
 
@@ -430,7 +432,6 @@ impl<S, I> Cache<S, I> {
     }
 }
 
-
 #[async_trait]
 impl<S, I> Handler for Cache<S, I>
 where
@@ -461,10 +462,10 @@ where
         let req_local_addr = req.local_addr().clone();
 
         let cache = match self.store.load_entry(&key).await {
-            Some(cache) => { 
+            Some(cache) => {
                 tracing::debug!("returning response from cache");
                 cache
-            },
+            }
             None => {
                 ctrl.call_next(req, depot, res).await;
                 if !res.body.is_stream() && !res.body.is_error() {

@@ -3,10 +3,13 @@
 FROM debian:bookworm-slim
 ARG TARGETPLATFORM
 RUN apt update \
-    && apt install -y openssl ca-certificates \
+    && apt install -y openssl ca-certificates curl \
     && apt clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 RUN mkdir -p app
+RUN useradd -m -u 10001 replex \
+    && mkdir -p /data/replex-cache \
+    && chown -R replex:replex /data /app
 COPY bin/ bin/
 RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ]; then \
     mv bin/x86_64-unknown-linux-gnu/replex app/replex && \
@@ -31,4 +34,10 @@ RUN if [ "${TARGETPLATFORM}" = "linux/arm64" ]; then \
 # COPY ./ci-target/release/replex ./
 
 EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -fsS http://localhost:80/ping || exit 1
+
+USER replex
+
 CMD ["/app/replex"]

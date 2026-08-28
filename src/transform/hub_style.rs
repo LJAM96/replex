@@ -1,16 +1,9 @@
-use crate::{
-    config::Config,
-    models::*,
-    plex_client::{PlexClient},
-};
+use super::hero_meta;
 use super::MediaStyleTransform;
 use super::Transform;
-use super::hero_meta;
+use crate::{config::Config, models::*, plex_client::PlexClient};
 use async_trait::async_trait;
-use futures_util::{
-    stream::{FuturesOrdered},
-    StreamExt,
-};
+use futures_util::{stream::FuturesOrdered, StreamExt};
 
 #[derive(Default, Debug)]
 pub struct HubStyleTransform {
@@ -49,7 +42,8 @@ pub enum DeviceType {
 
 impl DeviceType {
     pub fn from_context(context: &PlexContext) -> DeviceType {
-        let product = context.product.clone().unwrap_or_default().to_lowercase();
+        let product =
+            context.product.clone().unwrap_or_default().to_lowercase();
         let device = context.device.clone().unwrap_or_default().to_lowercase();
         let model = context.model.clone().unwrap_or_default().to_lowercase();
 
@@ -79,17 +73,17 @@ impl ClientHeroStyle {
             Platform::Android => {
                 match device_type {
                     DeviceType::Tv => {
-                    //   dbg!(context);
-                      Self {
-                          style: Some("hero".to_string()),
-                          // clip wil make the item info disappear on TV
-                          r#type: "clip".to_string(),
-                          // using clip makes it load thumbs instead of art as cover art. So we don't have to touch the background
-                          child_type: Some("clip".to_string()),
-                          cover_art_as_art: true, // Home doesn't work correctly without.
-                          cover_art_as_thumb: true,
-                          ..ClientHeroStyle::default()
-                      }
+                        //   dbg!(context);
+                        Self {
+                            style: Some("hero".to_string()),
+                            // clip wil make the item info disappear on TV
+                            r#type: "clip".to_string(),
+                            // using clip makes it load thumbs instead of art as cover art. So we don't have to touch the background
+                            child_type: Some("clip".to_string()),
+                            cover_art_as_art: true, // Home doesn't work correctly without.
+                            cover_art_as_thumb: true,
+                            ..ClientHeroStyle::default()
+                        }
                     }
                     _ => Self {
                         style: None,
@@ -104,26 +98,25 @@ impl ClientHeroStyle {
             Platform::Ios => ClientHeroStyle::ios_style(),
             Platform::TvOS => ClientHeroStyle::tvos_style(),
             _ => {
-              if product.clone().to_lowercase() == "plex web" {
-                ClientHeroStyle::web()
-              } else {
-                ClientHeroStyle::default()
-              }
-          }
-            // _ => {
-            //     if product.starts_with("Plex HTPC") {
-            //         ClientHeroStyle::htpc_style()
-            //     } else {
-            //         match product.to_lowercase().as_ref() {
-            //             "plex for lg" => ClientHeroStyle::htpc_style(),
-            //             "plex for xbox" => ClientHeroStyle::htpc_style(),
-            //             "plex for ps4" => ClientHeroStyle::htpc_style(),
-            //             "plex for ps5" => ClientHeroStyle::htpc_style(),
-            //             "plex for ios" => ClientHeroStyle::ios_style(),
-            //             _ => ClientHeroStyle::default(),
-            //         }
-            //     }
-            // }
+                if product.clone().to_lowercase() == "plex web" {
+                    ClientHeroStyle::web()
+                } else {
+                    ClientHeroStyle::default()
+                }
+            } // _ => {
+              //     if product.starts_with("Plex HTPC") {
+              //         ClientHeroStyle::htpc_style()
+              //     } else {
+              //         match product.to_lowercase().as_ref() {
+              //             "plex for lg" => ClientHeroStyle::htpc_style(),
+              //             "plex for xbox" => ClientHeroStyle::htpc_style(),
+              //             "plex for ps4" => ClientHeroStyle::htpc_style(),
+              //             "plex for ps5" => ClientHeroStyle::htpc_style(),
+              //             "plex for ios" => ClientHeroStyle::ios_style(),
+              //             _ => ClientHeroStyle::default(),
+              //         }
+              //     }
+              // }
         }
     }
 
@@ -134,7 +127,7 @@ impl ClientHeroStyle {
         }
     }
 
-   pub fn web() -> Self {
+    pub fn web() -> Self {
         Self {
             // Plex Web's hero renderer requires the hub Meta block
             // (displayFields/displayImages); without it the row silently
@@ -161,12 +154,12 @@ impl ClientHeroStyle {
     }
 
     pub fn tvos_style() -> Self {
-      Self {
-          cover_art_as_art: true,
-          cover_art_as_thumb: false, // ios doesnt load the subview as hero.
-          ..ClientHeroStyle::default()
-      }
-  }
+        Self {
+            cover_art_as_art: true,
+            cover_art_as_thumb: false, // ios doesnt load the subview as hero.
+            ..ClientHeroStyle::default()
+        }
+    }
 
     // pub fn for_client(platform: Platform, product: String, platform_version: String) -> Self {
     //     match platform {
@@ -205,16 +198,16 @@ impl Transform for HubStyleTransform {
             // TODO: Check why tries to load non existing collectiin? my guess is no access
             let is_hero =
                 item.is_hero(plex_client.clone()).await.unwrap_or(false);
-            
+
             if is_hero {
                 let style = ClientHeroStyle::from_context(options.clone());
 
                 item.style = style.style;
 
                 item.r#type = style.r#type;
-                
+
                 if style.include_meta {
-                  item.meta = Some(hero_meta());
+                    item.meta = Some(hero_meta());
                 }
 
                 let mut futures = FuturesOrdered::new();

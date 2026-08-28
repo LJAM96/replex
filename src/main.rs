@@ -12,7 +12,7 @@ use tracing_subscriber::prelude::*;
 #[tokio::main]
 async fn main() {
     let config: Config = Config::figment().extract().unwrap();
-    
+
     // set default log level
     if let Err(i) = env::var("RUST_LOG") {
         env::set_var("RUST_LOG", "info")
@@ -55,13 +55,15 @@ async fn main() {
         // .with(otlp_layer)
         .with(fmt_layer)
         .init();
-        
+
     if config.host.is_none() {
         tracing::error!("REPLEX_HOST is required. Exiting");
         return;
     }
     if config.token.is_none() {
-        tracing::warn!("REPLEX_TOKEN not defined. Hero art might not load correctly.");
+        tracing::warn!(
+            "REPLEX_TOKEN not defined. Hero art might not load correctly."
+        );
     }
 
     // spawn our background task

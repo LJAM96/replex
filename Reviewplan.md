@@ -43,11 +43,44 @@ on all files touched by these fixes.
 
 ## Still open (P2)
 
-Atomic disk-cache writes (tmp + rename), persisted photo content type for
-disk hits, removing the `/replex/test_proxy` route from release builds,
-tightening permissive CORS, panic-path hardening for hostile headers/params,
-CI running fmt/clippy/test before Docker publishing, Docker `USER` /
-healthcheck hardening.
+None remaining in the working tree (uncommitted). All P2 items below were
+implemented against `main`:
+
+- **Atomic disk-cache writes.** `disk_cache::put_full` writes to a
+  `<key>.tmp` file and swaps it into place with an atomic `rename`, so a
+  crash or concurrent read can never observe a half-written response
+  (`src/disk_cache.rs`). The size counter still subtracts the old entry
+  before counting the new one.
+- **Persisted photo content type.** Disk cache entries are now a small
+  record (`CacheRecord`: body + `content_type`). `photo_cache_hoop` stores
+  the upstream content type and replays it on a disk hit, so WebP/PNG/etc.
+  are no longer mislabelled `image/jpeg` (`src/routes.rs`, `src/disk_cache.rs`).
+- **`/replex/test_proxy` removed from release builds.** Both the route
+  registration and the handler (plus the `utils::test_proxy` helper) are
+  gated behind `#[cfg(debug_assertions)]`; verified absent from the release
+  binary (`strings` shows no `webhook.site` / `replex/test_proxy`).
+- **Tightened CORS.** Replaced `Cors::permissive()` with an origin
+  allow-list (default `app.plex.tv`/`plex.tv`, overridable via
+  `REPLEX_CORS_ALLOWED_ORIGINS`), restricted methods and the Plex request
+  headers, and `allow_credentials(true)` (`src/routes.rs`).
+- **Panic-path hardening.** `Config::dynamic` no longer unwraps the `HOST`
+  header or Base32 decode (returns base config on malformed input);
+  `deserialize_screen_resolution` no longer panics on malformed values;
+  `PlexClient::from_context` now returns `Result` and every caller returns
+  `401`/`403`/`Err` instead of panicking (`src/config.rs`, `src/models.rs`,
+  `src/plex_client.rs`, `src/routes.rs`, `src/hub_cache.rs`).
+- **CI runs validation before publishing.** `pr.yml` now runs on
+  `pull_request` (not `pull_request_target`), validates with
+  `cargo fmt --check`, `cargo clippy`, `cargo test` and a no-push Docker
+  build, and no longer pushes images or uses `PERSONAL_TOKEN`.
+  `docker-publish.yml` (main-only) runs the same validation as a required
+  job before building/pushing the image.
+- **Docker `USER` / healthcheck hardening.** Both `Dockerfile` and
+  `Dockerfile.github` install `curl`, create an unprivileged UID `10001`,
+  add a `/ping` `HEALTHCHECK`, and write cache to a chowned `/data`. The
+  Portainer stack runs the container `read_only` with a `/tmp` tmpfs and a
+  `replex-cache:/data` volume, and the example `REPLEX_HOST` / usernames
+  were replaced with generic placeholders.
 
 ---
 

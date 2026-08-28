@@ -171,7 +171,6 @@ impl Config {
     }
 }
 
-
 fn deserialize_client_identity_map<'de, D>(
     deserializer: D,
 ) -> Result<std::collections::HashMap<String, String>, D::Error>
@@ -180,8 +179,12 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     match value {
-        serde_json::Value::String(s) if s.trim().is_empty() => Ok(Default::default()),
-        serde_json::Value::String(s) => serde_json::from_str(&s).map_err(serde::de::Error::custom),
+        serde_json::Value::String(s) if s.trim().is_empty() => {
+            Ok(Default::default())
+        }
+        serde_json::Value::String(s) => {
+            serde_json::from_str(&s).map_err(serde::de::Error::custom)
+        }
         v => serde_json::from_value(v).map_err(serde::de::Error::custom),
     }
 }
@@ -248,19 +251,39 @@ impl Config {
     }
 
     pub fn dynamic(req: &salvo::Request) -> Figment {
-        let host = req.headers().get("HOST").unwrap().to_str().unwrap();
         let mut config = Config::figment();
+        // Every header/param is treated as potentially hostile or malformed.
+        // Any failure here simply means "no replex.stream host override" — we
+        // must never panic on a client-supplied value.
+        let host = match req.headers().get("HOST").and_then(|v| v.to_str().ok())
+        {
+            Some(h) => h,
+            None => return config,
+        };
         if host.contains("replex.stream") {
             use data_encoding::BASE32;
             let val: Vec<&str> = host.split(".replex.stream").collect();
-            let owned_val = val[0].to_ascii_uppercase().to_owned();
-            let mut output =
-                vec![0; BASE32.decode_len(owned_val.len()).unwrap()];
-            let len = BASE32
-                .decode_mut(owned_val.as_bytes(), &mut output)
-                .unwrap();
-            config = config
-                .join(("host", std::str::from_utf8(&output[0..len]).unwrap()));
+            let owned_val = match val.first() {
+                Some(v) => v.to_ascii_uppercase(),
+                None => return config,
+            };
+            let Ok(decoded_len) = BASE32.decode_len(owned_val.len()) else {
+                return config;
+            };
+            let mut output = vec![0u8; decoded_len];
+            let Ok(len) = BASE32.decode_mut(owned_val.as_bytes(), &mut output)
+            else {
+                return config;
+            };
+            if len == 0 {
+                return config;
+            }
+            match std::str::from_utf8(&output[0..len]) {
+                Ok(host_value) => {
+                    config = config.join(("host", host_value));
+                }
+                Err(_) => return config,
+            }
         }
         config
         // Figment::new().merge(Env::prefixed("REPLEX_"))

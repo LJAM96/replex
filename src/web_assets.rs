@@ -37,7 +37,6 @@ fn cache_policy_for(path: &str) -> &'static str {
     }
 }
 
-
 /// Fetch an asset from upstream once and stash the raw bytes.
 async fn fetch_upstream(path: &str) -> Result<CachedAsset, StatusCode> {
     let config: Config = Config::figment().extract().unwrap();

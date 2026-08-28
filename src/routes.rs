@@ -14,10 +14,11 @@ use http;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use salvo::compression::Compression;
-use salvo::cors::Cors;
+use salvo::cors::{AllowOrigin, Cors};
 use salvo::http::header;
 use salvo::http::header::CONTENT_TYPE;
 use salvo::http::HeaderValue;
+use salvo::http::Method;
 use salvo::http::{Request, Response, StatusCode};
 use salvo::prelude::*;
 use salvo::routing::PathFilter;
@@ -58,7 +59,61 @@ pub fn route() -> Router {
     let guid = regex::Regex::new(":").unwrap();
     PathFilter::register_wisp_regex("colon", guid);
 
-    let mut router = Router::with_hoop(Cors::permissive().into_handler())
+    // Restricted CORS: only the listed origins may read responses, and only
+    // the Plex request headers/methods are permitted. Avoids the previous
+    // fully permissive (wildcard) policy that let any website drive the
+    // proxy on a victim's behalf. Origins are configurable via
+    // REPLEX_CORS_ALLOWED_ORIGINS (comma separated); Plex Web hosts are the
+    // sensible default.
+    let cors = {
+        let allowed_origins: Vec<HeaderValue> =
+            std::env::var("REPLEX_CORS_ALLOWED_ORIGINS")
+                .ok()
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .filter_map(|s| HeaderValue::from_str(&s).ok())
+                        .collect::<Vec<_>>()
+                })
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| {
+                    ["https://app.plex.tv", "https://plex.tv"]
+                        .iter()
+                        .map(|s| HeaderValue::from_static(s))
+                        .collect()
+                });
+        Cors::new()
+            .allow_origin(AllowOrigin::list(allowed_origins))
+            .allow_methods(vec![
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
+                Method::HEAD,
+                Method::OPTIONS,
+            ])
+            .allow_headers(vec![
+                header::ACCEPT,
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                header::ORIGIN,
+                header::RANGE,
+                header::HeaderName::from_static("x-plex-token"),
+                header::HeaderName::from_static("x-plex-client-identifier"),
+                header::HeaderName::from_static("x-plex-device-name"),
+                header::HeaderName::from_static("x-plex-platform"),
+                header::HeaderName::from_static("x-plex-product"),
+                header::HeaderName::from_static("x-plex-version"),
+                header::HeaderName::from_static("x-plex-device"),
+                header::HeaderName::from_static("x-plex-session-id"),
+                header::HeaderName::from_static("x-plex-playback-session-id"),
+                header::HeaderName::from_static("x-plex-target-client-id"),
+            ])
+            .allow_credentials(true)
+            .into_handler()
+    };
+    let mut router = Router::with_hoop(cors)
         .hoop(Logger::new())
         .hoop(api_cache_control)
         .hoop(should_skip)
@@ -223,11 +278,6 @@ pub fn route() -> Router {
         )
         .push(
             Router::new()
-                .path("/replex/test_proxy/<**rest>")
-                .goal(test_proxy_request),
-        )
-        .push(
-            Router::new()
                 .path("/replex/image/hero/<type>/<uuid>")
                 .get(hero_image),
         )
@@ -264,6 +314,16 @@ pub fn route() -> Router {
         )
         .push(Router::with_path("<**rest>").goal(proxy_request));
 
+    // Development-only debugging proxy. Never present in release builds.
+    #[cfg(debug_assertions)]
+    {
+        router = router.push(
+            Router::new()
+                .path("/replex/test_proxy/<**rest>")
+                .goal(test_proxy_request),
+        );
+    }
+
     router
 }
 
@@ -274,12 +334,13 @@ pub fn route() -> Router {
 /// upstream work on first view. Posters are stable per item+size, so cache
 /// them (per unique query minus the client token) and let every user share
 /// the warm entries.
-pub(crate) static PHOTO_CACHE: Lazy<moka::future::Cache<String, CachedImage>> = Lazy::new(|| {
-    moka::future::Cache::builder()
-        .max_capacity(20_000)
-        .time_to_idle(std::time::Duration::from_secs(60 * 60 * 24))
-        .build()
-});
+pub(crate) static PHOTO_CACHE: Lazy<moka::future::Cache<String, CachedImage>> =
+    Lazy::new(|| {
+        moka::future::Cache::builder()
+            .max_capacity(20_000)
+            .time_to_idle(std::time::Duration::from_secs(60 * 60 * 24))
+            .build()
+    });
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CachedImage {
@@ -469,11 +530,18 @@ fn normalize_library_fetch(req: &mut Request) {
 /// canonicalized away (`canonical_library_path`), so the library warmer
 /// — which builds its keys through this same function — warms entries that
 /// real client requests actually consume.
-pub(crate) fn library_cache_key_for(raw_path_and_query: &str, token: Option<&str>) -> String {
+pub(crate) fn library_cache_key_for(
+    raw_path_and_query: &str,
+    token: Option<&str>,
+) -> String {
     let scope = token
         .map(library_user_scope)
         .unwrap_or_else(|| "anon".to_string());
-    format!("library:u:{}:{}", scope, canonical_library_path(raw_path_and_query))
+    format!(
+        "library:u:{}:{}",
+        scope,
+        canonical_library_path(raw_path_and_query)
+    )
 }
 
 /// Extract the Plex token from a request: header first, then query param,
@@ -529,9 +597,12 @@ async fn library_cache_lookup(
             header::CACHE_CONTROL,
             header::HeaderValue::from_static("no-cache"),
         );
-        res.headers_mut()
-            .insert(CONTENT_TYPE, header::HeaderValue::from_static("application/json"));
-        *res.body_mut() = salvo::http::body::ResBody::Once(bytes::Bytes::from(data));
+        res.headers_mut().insert(
+            CONTENT_TYPE,
+            header::HeaderValue::from_static("application/json"),
+        );
+        *res.body_mut() =
+            salvo::http::body::ResBody::Once(bytes::Bytes::from(data));
         match apply_policy_transforms(req, res).await {
             Ok(()) => {
                 ctrl.skip_rest();
@@ -606,16 +677,22 @@ async fn photo_cache_hoop(
     ctrl: &mut FlowCtrl,
 ) -> Result<(), anyhow::Error> {
     let key = photo_cache_key(req);
-    if let Some(data) = crate::disk_cache::get(&key).await {
-        res.headers_mut().insert(
-            CONTENT_TYPE,
-            header::HeaderValue::from_static("image/jpeg"),
-        );
+    if let Some(record) = crate::disk_cache::get_full(&key).await {
+        // A persisted photo keeps its original content type (WebP, PNG, ...).
+        // Fall back to image/jpeg for legacy entries that stored none.
+        let ct = record
+            .content_type
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| "image/jpeg".to_string());
+        if let Ok(v) = header::HeaderValue::from_str(&ct) {
+            res.headers_mut().insert(CONTENT_TYPE, v);
+        }
         res.headers_mut().insert(
             header::CACHE_CONTROL,
             header::HeaderValue::from_static("public, max-age=259200"),
         );
-        *res.body_mut() = salvo::http::body::ResBody::Once(bytes::Bytes::from(data));
+        *res.body_mut() =
+            salvo::http::body::ResBody::Once(bytes::Bytes::from(record.body));
         return Ok(());
     }
     if let Some(img) = PHOTO_CACHE.get(&key).await {
@@ -648,17 +725,17 @@ async fn photo_cache_hoop(
         return Ok(());
     }
 
-    let taken = std::mem::replace(res.body_mut(), salvo::http::body::ResBody::None);
+    let taken =
+        std::mem::replace(res.body_mut(), salvo::http::body::ResBody::None);
     if let salvo::http::body::ResBody::Once(body) = taken {
-        let should_cache =
-            body.len() <= 4 * 1024 * 1024
-                && res
-                    .headers()
-                    .get(CONTENT_TYPE)
-                    .and_then(|v| v.to_str().ok())
-                    .map(|v| v.starts_with("image/"))
-                    .unwrap_or(false)
-                && res.status_code.unwrap_or(StatusCode::OK).is_success();
+        let should_cache = body.len() <= 4 * 1024 * 1024
+            && res
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.starts_with("image/"))
+                .unwrap_or(false)
+            && res.status_code.unwrap_or(StatusCode::OK).is_success();
         if should_cache {
             let entry = CachedImage {
                 content_type: res
@@ -675,7 +752,17 @@ async fn photo_cache_hoop(
             };
             let n = entry.body.len();
             PHOTO_CACHE.insert(key.clone(), entry).await;
-            let _ = crate::disk_cache::put(&key, &body).await;
+            let content_type = res
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            let _ = crate::disk_cache::put_full(
+                &key,
+                &body,
+                content_type.as_deref(),
+            )
+            .await;
             tracing::debug!(bytes = n, "cached photo response");
         }
         *res.body_mut() = salvo::http::body::ResBody::Once(body);
@@ -705,8 +792,10 @@ async fn proxy_request(
     // Playback changes flowing through the proxy (scrobbles, playback
     // stopping) affect what hubs display. Mark all hub payloads stale so
     // the next request serves instantly while refreshing in the background.
-    if crate::hub_cache::is_playback_invalidation(req.uri().path(), req.uri().query())
-    {
+    if crate::hub_cache::is_playback_invalidation(
+        req.uri().path(),
+        req.uri().query(),
+    ) {
         crate::hub_cache::mark_all_hubs_stale();
         tracing::debug!(
             path = %req.uri().path(),
@@ -716,6 +805,10 @@ async fn proxy_request(
     do_proxy_request(req, res, depot, ctrl).await;
 }
 
+/// Development-only debugging proxy. Deliberately excluded from release
+/// builds: a production service must not ship an externally reachable path
+/// that forwards requests to an arbitrary third-party endpoint.
+#[cfg(debug_assertions)]
 #[handler]
 async fn test_proxy_request(
     req: &mut Request,
@@ -829,7 +922,14 @@ async fn protected_redirect_stream(
     }
 
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = PlexClient::from_context(&context);
+    let plex_client = match PlexClient::from_context(&context) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build Plex client from request context");
+            res.status_code(StatusCode::UNAUTHORIZED);
+            return;
+        }
+    };
 
     let identity = match plex_client.get_current_user().await {
         Ok(identity) => identity,
@@ -868,8 +968,11 @@ async fn protected_redirect_stream(
     // The lookup is scoped to THIS account and its current policy, so one
     // account's cached decision can never authorise another's request.
     if let Some(part_id) = req.param::<i64>("partid") {
-        let part_key =
-            crate::plex_client::part_policy_key(&identity.uuid, &policy, part_id);
+        let part_key = crate::plex_client::part_policy_key(
+            &identity.uuid,
+            &policy,
+            part_id,
+        );
         match crate::plex_client::PART_POLICY_CACHE.get(&part_key).await {
             Some(true) => {
                 tracing::debug!(
@@ -955,7 +1058,14 @@ async fn resolve_local_media_path(req: &mut Request, res: &mut Response) {
         //    context.token = Some(segments.last().unwrap().to_string());
         //}
 
-        let plex_client = PlexClient::from_context(&context);
+        let plex_client = match PlexClient::from_context(&context) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to build Plex client from request context");
+                res.status_code(StatusCode::UNAUTHORIZED);
+                return;
+            }
+        };
         let rurl = plex_client.get_hero_art(uuid.to_string()).await;
         if rurl.is_some() {
             add_query_param_salvo(req, "url".to_string(), rurl.unwrap());
@@ -1127,7 +1237,14 @@ pub async fn hero_image(
     let t = req.param::<String>("type").unwrap();
     let uuid = req.param::<String>("uuid").unwrap();
 
-    let plex_client = PlexClient::from_context(&context);
+    let plex_client = match PlexClient::from_context(&context) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build Plex client from request context");
+            res.status_code(StatusCode::UNAUTHORIZED);
+            return;
+        }
+    };
     let url = plex_client.get_hero_art(uuid).await;
     if url.is_none() {
         res.status_code(StatusCode::NOT_FOUND);
@@ -1151,7 +1268,13 @@ pub async fn direct_stream_fallback(
 ) -> Result<(), anyhow::Error> {
     let config: Config = Config::dynamic(req).extract().unwrap();
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = PlexClient::from_context(&context);
+    let plex_client = match PlexClient::from_context(&context) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build Plex client from request context");
+            return Err(e);
+        }
+    };
     let queries = req.queries().clone();
 
     let direct_play = queries
@@ -1269,7 +1392,13 @@ async fn apply_policy_transforms(
     container.content_type = content_type;
 
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = PlexClient::from_context(&context);
+    let plex_client = match PlexClient::from_context(&context) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build Plex client from request context");
+            return Err(e);
+        }
+    };
 
     TransformBuilder::new(plex_client, context.clone())
         .with_transform(ResolutionPolicyTransform)
@@ -1353,7 +1482,10 @@ fn canonical_fetch_path(req: &Request, key_path: &str) -> String {
 
 /// Shape the canonical payload for this specific request: honor
 /// excludeContinueWatching and per-row count limits clients asked for.
-fn shape_canonical_hubs(container: &mut MediaContainerWrapper<MediaContainer>, context: &PlexContext) {
+fn shape_canonical_hubs(
+    container: &mut MediaContainerWrapper<MediaContainer>,
+    context: &PlexContext,
+) {
     let hubs = container.media_container.children_mut();
     if context.exclude_continue_watching {
         hubs.retain(|h| {
@@ -1380,7 +1512,13 @@ pub async fn cached_hubs_response(
     res: &mut Response,
 ) -> Result<(), anyhow::Error> {
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = PlexClient::from_context(&context);
+    let plex_client = match PlexClient::from_context(&context) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build Plex client from request context");
+            return Err(e);
+        }
+    };
     let content_type = get_content_type_from_headers(req.headers_mut());
 
     let key_path = cache_key_for_request(req);
@@ -1394,7 +1532,8 @@ pub async fn cached_hubs_response(
     // token-hash-scoped key so one account can never be served another
     // account's payload. Per-user transforms still run below on every
     // request either way.
-    let cache_key = crate::hub_cache::hub_cache_key(&key_path, context.token.as_deref());
+    let cache_key =
+        crate::hub_cache::hub_cache_key(&key_path, context.token.as_deref());
     let mut container: MediaContainerWrapper<MediaContainer> =
         match plex_client.cache.get(&cache_key).await {
             Some(mut cached) => {
@@ -1420,10 +1559,15 @@ pub async fn cached_hubs_response(
                 cached
             }
             None => {
-                let parsed =
-                    crate::hub_cache::fetch_hubs_payload(&plex_client, &fetch_path)
-                        .await?;
-                plex_client.cache.insert(cache_key.clone(), parsed.clone()).await;
+                let parsed = crate::hub_cache::fetch_hubs_payload(
+                    &plex_client,
+                    &fetch_path,
+                )
+                .await?;
+                plex_client
+                    .cache
+                    .insert(cache_key.clone(), parsed.clone())
+                    .await;
                 crate::hub_cache::track_fetched(cache_key.clone()).await;
                 parsed
             }
@@ -1464,7 +1608,13 @@ pub async fn transform_hubs_response(
     res: &mut Response,
 ) -> Result<(), anyhow::Error> {
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = PlexClient::from_context(&context);
+    let plex_client = match PlexClient::from_context(&context) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build Plex client from request context");
+            return Err(e);
+        }
+    };
     let content_type = get_content_type_from_headers(req.headers_mut());
 
     let mut container: MediaContainerWrapper<MediaContainer> =
@@ -1502,7 +1652,14 @@ pub async fn transform_req_content_directory(
 
     let config: Config = Config::dynamic(req).extract().unwrap();
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = PlexClient::from_context(&context);
+    let plex_client = match PlexClient::from_context(&context) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build Plex client from request context");
+            res.status_code(StatusCode::UNAUTHORIZED);
+            return;
+        }
+    };
     let content_type = get_content_type_from_headers(req.headers_mut());
 
     // Old clients send both contentDirectoryID and pinnedContentDirectoryID.
@@ -1610,7 +1767,13 @@ pub async fn get_collections_children(
         .filter(|&v| !v.parse::<u32>().is_err())
         .map(|v| v.parse().unwrap())
         .collect();
-    let plex_client = PlexClient::from_context(&context);
+    let plex_client = match PlexClient::from_context(&context) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build Plex client from request context");
+            return Err(e);
+        }
+    };
     let content_type = get_content_type_from_headers(req.headers_mut());
 
     // We dont listen to pagination. We have a hard max of 250 per collection
@@ -1663,7 +1826,13 @@ pub async fn default_transform(
 ) -> Result<(), anyhow::Error> {
     let config: Config = Config::dynamic(req).extract().unwrap();
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = PlexClient::from_context(&context);
+    let plex_client = match PlexClient::from_context(&context) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build Plex client from request context");
+            return Err(e);
+        }
+    };
     let content_type = get_content_type_from_headers(req.headers_mut());
     let style = req.param::<Style>("style").unwrap();
     let rest_path = req.param::<String>("**rest").unwrap();
@@ -1719,7 +1888,14 @@ pub async fn default_transform(
 pub async fn get_library_item_metadata(req: &mut Request, res: &mut Response) {
     let config: Config = Config::dynamic(req).extract().unwrap();
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = PlexClient::from_context(&context);
+    let plex_client = match PlexClient::from_context(&context) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build Plex client from request context");
+            res.status_code(StatusCode::UNAUTHORIZED);
+            return;
+        }
+    };
     let content_type = get_content_type_from_headers(req.headers_mut());
 
     if config.disable_related {
@@ -1756,7 +1932,13 @@ pub async fn get_library_item_metadata(req: &mut Request, res: &mut Response) {
 #[handler]
 async fn force_maximum_quality(req: &mut Request) -> Result<(), anyhow::Error> {
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = PlexClient::from_context(&context);
+    let plex_client = match PlexClient::from_context(&context) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build Plex client from request context");
+            return Err(e);
+        }
+    };
     let config: Config = Config::dynamic(req).extract().unwrap();
     let mut queries = req.queries().clone();
 
@@ -1919,7 +2101,13 @@ async fn get_transcoding_for_request(
     req: &mut Request,
 ) -> Result<TranscodingStatus, anyhow::Error> {
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = PlexClient::from_context(&context);
+    let plex_client = match PlexClient::from_context(&context) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build Plex client from request context");
+            return Err(e);
+        }
+    };
 
     let mut res = &mut Response::new();
     let mut depot = &mut Depot::new();
@@ -1972,7 +2160,13 @@ async fn video_transcode_fallback(
     ctrl: &mut FlowCtrl,
 ) -> Result<(), anyhow::Error> {
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = PlexClient::from_context(&context);
+    let plex_client = match PlexClient::from_context(&context) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build Plex client from request context");
+            return Err(e);
+        }
+    };
     let config: Config = Config::dynamic(req).extract().unwrap();
     let mut queries = req.queries().clone();
     let original_queries = req.queries().clone();
@@ -2212,7 +2406,13 @@ async fn enforce_resolution_policy(
     }
 
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = PlexClient::from_context(&context);
+    let plex_client = match PlexClient::from_context(&context) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build Plex client from request context");
+            return Err(e);
+        }
+    };
 
     let identity = match plex_client.get_current_user().await {
         Ok(identity) => identity,
@@ -2376,7 +2576,13 @@ async fn enforce_resolution_policy(
 #[handler]
 async fn auto_select_version(req: &mut Request) {
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = PlexClient::from_context(&context);
+    let plex_client = match PlexClient::from_context(&context) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build Plex client from request context");
+            return;
+        }
+    };
     let mut queries = req.queries().clone();
     let media_index = queries.get("mediaIndex");
 
@@ -2486,7 +2692,9 @@ mod tests {
         let mock_server = get_mock_server();
         // Hold the env lock and reset config for the whole test so sibling
         // tests mutating REPLEX_* vars can't race this request.
-        let _env = crate::test_helpers::pin_default_env(mock_server.address().to_string().as_str());
+        let _env = crate::test_helpers::pin_default_env(
+            mock_server.address().to_string().as_str(),
+        );
 
         let service = Service::new(super::route());
 
@@ -2520,9 +2728,10 @@ mod tests {
             .unwrap();
             return;
         }
-        let expected: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(expected_path).unwrap())
-                .unwrap();
+        let expected: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(expected_path).unwrap(),
+        )
+        .unwrap();
         // Hero transforms emit absolute image URLs that embed the upstream
         // host:port; normalise ephemeral mock ports so comparisons are
         // deterministic.
@@ -2536,7 +2745,9 @@ mod tests {
                     serde_json::Value::Array(a.iter().map(normalize).collect())
                 }
                 serde_json::Value::Object(o) => serde_json::Value::Object(
-                    o.iter().map(|(k, val)| (k.clone(), normalize(val))).collect(),
+                    o.iter()
+                        .map(|(k, val)| (k.clone(), normalize(val)))
+                        .collect(),
                 ),
                 other => other.clone(),
             }
@@ -2548,10 +2759,13 @@ mod tests {
     async fn timeline_stop_marks_hubs_stale() {
         let _ = tracing_subscriber::fmt::try_init();
         let mock_server = get_mock_server();
-        let _env = crate::test_helpers::pin_default_env(&mock_server.address().to_string());
+        let _env = crate::test_helpers::pin_default_env(
+            &mock_server.address().to_string(),
+        );
 
         // A fresh age record must exist before the playback event.
-        crate::hub_cache::track_fetched("hubcache:/hubs/promoted".to_string()).await;
+        crate::hub_cache::track_fetched("hubcache:/hubs/promoted".to_string())
+            .await;
         assert!(
             !crate::hub_cache::is_stale(
                 "hubcache:/hubs/promoted",
@@ -2594,21 +2808,26 @@ mod tests {
                 .header("content-type", "application/javascript")
                 .body("console.log('hi')");
         });
-        let _env = crate::test_helpers::pin_default_env(&server.address().to_string());
+        let _env =
+            crate::test_helpers::pin_default_env(&server.address().to_string());
 
         let service = Service::new(super::route());
 
         for i in 0..2 {
-            let mut res = TestClient::get("http://127.0.0.1:5800/web/test-asset.js")
-                .add_header("HOST", &server.address().to_string(), true)
-                .send((&service))
-                .await;
+            let mut res =
+                TestClient::get("http://127.0.0.1:5800/web/test-asset.js")
+                    .add_header("HOST", &server.address().to_string(), true)
+                    .send((&service))
+                    .await;
             assert_eq!(res.status_code, Some(StatusCode::OK), "request {i}");
             assert_eq!(
                 res.headers().get("cache-control").unwrap(),
                 "public, max-age=31536000, immutable"
             );
-            assert_eq!(res.headers().get("content-type").unwrap(), "application/javascript");
+            assert_eq!(
+                res.headers().get("content-type").unwrap(),
+                "application/javascript"
+            );
         }
         assert_eq!(
             asset_mock.hits(),
@@ -2621,7 +2840,9 @@ mod tests {
     async fn test_ping() {
         let _ = tracing_subscriber::fmt::try_init();
         let mock_server = get_mock_server();
-        let _env = crate::test_helpers::pin_default_env(mock_server.address().to_string().as_str());
+        let _env = crate::test_helpers::pin_default_env(
+            mock_server.address().to_string().as_str(),
+        );
 
         let service = Service::new(super::route());
 
@@ -2650,7 +2871,10 @@ mod library_cache_tests {
 
     #[test]
     fn canonical_library_path_strips_token_and_is_order_stable() {
-        let with_token = canonical_library_path(&format!("{}&X-Plex-Token=secret", WARM_PATH));
+        let with_token = canonical_library_path(&format!(
+            "{}&X-Plex-Token=secret",
+            WARM_PATH
+        ));
         let no_token = canonical_library_path(WARM_PATH);
         let reordered = canonical_library_path(
             "/library/sections/6/all?X-Plex-Container-Size=50&X-Plex-Container-Start=0",
@@ -2664,8 +2888,14 @@ mod library_cache_tests {
         ));
 
         assert_eq!(with_token, no_token, "token must not influence the key");
-        assert!(!with_token.contains("secret"), "raw tokens must never appear in keys");
-        assert_eq!(no_token, reordered, "param order must not influence the key");
+        assert!(
+            !with_token.contains("secret"),
+            "raw tokens must never appear in keys"
+        );
+        assert_eq!(
+            no_token, reordered,
+            "param order must not influence the key"
+        );
         assert_eq!(
             no_token, with_client_noise,
             "client-shaping noise must not fragment the cache: warmed entries \
@@ -2699,7 +2929,10 @@ mod library_cache_tests {
             "different accounts must never share library cache entries: raw \
              library payloads embed per-account watch state"
         );
-        assert!(a1.starts_with("library:u:"), "library keys are always user-scoped");
+        assert!(
+            a1.starts_with("library:u:"),
+            "library keys are always user-scoped"
+        );
         assert!(!a1.contains("tokenA"), "raw tokens must not appear in keys");
     }
 
@@ -2715,9 +2948,10 @@ mod library_cache_tests {
         const CLIENT_NOISE: &str = "excludeFields=summary&includeGeolocation=1\
             &X-Plex-Client-Identifier=pxweb&X-Plex-Platform=Safari";
         let mut probe = salvo::http::Request::default();
-        let uri: hyper::Uri = format!("{}&{}&X-Plex-Token=admintoken", WARM_PATH, CLIENT_NOISE)
-            .parse()
-            .unwrap();
+        let uri: hyper::Uri =
+            format!("{}&{}&X-Plex-Token=admintoken", WARM_PATH, CLIENT_NOISE)
+                .parse()
+                .unwrap();
         probe.set_uri(uri);
         probe.headers_mut().insert(
             "X-Plex-Token",
@@ -2742,8 +2976,11 @@ mod library_cache_tests {
 
         // A different account must not consume the warmed entry.
         let mut probe_other = salvo::http::Request::default();
-        probe_other
-            .set_uri(format!("{}&X-Plex-Token=othertoken", WARM_PATH).parse().unwrap());
+        probe_other.set_uri(
+            format!("{}&X-Plex-Token=othertoken", WARM_PATH)
+                .parse()
+                .unwrap(),
+        );
         assert_ne!(
             library_cache_key(&probe_other),
             warmer_key,
@@ -2867,8 +3104,13 @@ mod library_cache_tests {
             .take_string()
             .await
             .unwrap();
-        let monday: serde_json::Value = serde_json::from_str(&content_monday).unwrap();
-        assert_eq!(sections_mock.hits(), 1, "first request must fetch upstream");
+        let monday: serde_json::Value =
+            serde_json::from_str(&content_monday).unwrap();
+        assert_eq!(
+            sections_mock.hits(),
+            1,
+            "first request must fetch upstream"
+        );
         assert!(
             monday["MediaContainer"]["Metadata"]
                 .as_array()
@@ -2901,7 +3143,8 @@ mod library_cache_tests {
             .take_string()
             .await
             .unwrap();
-        let tuesday: serde_json::Value = serde_json::from_str(&content_tuesday).unwrap();
+        let tuesday: serde_json::Value =
+            serde_json::from_str(&content_tuesday).unwrap();
 
         assert_eq!(
             sections_mock.hits(),
@@ -2945,7 +3188,9 @@ mod library_cache_tests {
                 .header("X-Plex-Token", "4ktoken");
             then.status(200)
                 .header("content-type", "application/json")
-                .body(r#"{"id": 1, "uuid": "uuid-admin", "username": "admin"}"#);
+                .body(
+                    r#"{"id": 1, "uuid": "uuid-admin", "username": "admin"}"#,
+                );
         });
         let _limited_identity = server.mock(|when, then| {
             when.method(httpmock::Method::GET)
@@ -3009,7 +3254,11 @@ mod library_cache_tests {
         let service = Service::new(super::route());
         let url = "http://127.0.0.1:5800/library/sections/6/all?X-Plex-Container-Size=50&X-Plex-Container-Start=0";
 
-        async fn browse(service: &Service, url: &str, token: &str) -> serde_json::Value {
+        async fn browse(
+            service: &Service,
+            url: &str,
+            token: &str,
+        ) -> serde_json::Value {
             let content = TestClient::get(url)
                 .add_header("HOST", "127.0.0.1:5800", true)
                 .add_header("X-Plex-Token", token, true)
@@ -3032,7 +3281,11 @@ mod library_cache_tests {
 
         // Unlimited account: sees the item with its 4K media version.
         let admin = browse(&service, url, "4ktoken").await;
-        assert_eq!(sections_mock.hits(), 1, "admin request must fetch upstream");
+        assert_eq!(
+            sections_mock.hits(),
+            1,
+            "admin request must fetch upstream"
+        );
         assert_eq!(
             metadata(&admin).len(),
             1,

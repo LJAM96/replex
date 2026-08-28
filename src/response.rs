@@ -1,21 +1,18 @@
-
-
-use serde::Serialize;
-use yaserde::YaSerialize;
-use yaserde::ser::to_string as to_xml_str;
+use crate::models::MediaContainerWrapper;
+use crate::utils::*;
 use async_trait::async_trait;
-use yaserde;
-use salvo::Scribe;
 use salvo::http::header::{HeaderValue, CONTENT_TYPE};
 use salvo::http::{Response, StatusError};
 use salvo::writing::Json;
-use crate::models::MediaContainerWrapper;
-use crate::utils::*;
-
+use salvo::Scribe;
+use serde::Serialize;
+use yaserde;
+use yaserde::ser::to_string as to_xml_str;
+use yaserde::YaSerialize;
 
 impl<T> Scribe for MediaContainerWrapper<T>
-    where
-    T: Serialize  + YaSerialize + Send,
+where
+    T: Serialize + YaSerialize + Send,
 {
     #[inline]
     fn render(self, res: &mut Response) {
@@ -28,15 +25,13 @@ impl<T> Scribe for MediaContainerWrapper<T>
 
 pub struct Xml<T>(pub T);
 
-
-
 #[async_trait]
 impl<T> Scribe for Xml<T>
 where
-    T: YaSerialize + Send
+    T: YaSerialize + Send,
 {
     #[inline]
-    fn render(self, res: &mut Response) {;
+    fn render(self, res: &mut Response) {
         match to_xml_str(&self.0) {
             Ok(bytes) => {
                 res.headers_mut().insert(

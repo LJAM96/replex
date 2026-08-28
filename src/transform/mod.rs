@@ -1,36 +1,35 @@
 pub mod collection_style;
 pub mod hub_interleave;
-pub mod hub_watched;
-pub mod user_state;
 pub mod hub_key;
 pub mod hub_limit;
-pub mod media_style;
 pub mod hub_section_directory;
 pub mod hub_style;
+pub mod hub_watched;
 pub mod library_interleave;
-pub mod restrictions;
+pub mod media_style;
 pub mod resolution_policy;
+pub mod restrictions;
+pub mod user_state;
 
 pub use collection_style::CollectionStyleTransform;
 pub use hub_interleave::HubInterleaveTransform;
-pub use user_state::UserStateTransform;
-pub use hub_watched::HubWatchedTransform;
 pub use hub_key::HubKeyTransform;
 pub use hub_limit::HubChildrenLimitTransform;
-pub use media_style::MediaStyleTransform;
 pub use hub_section_directory::HubSectionDirectoryTransform;
 pub use hub_style::{ClientHeroStyle, HubStyleTransform};
+pub use hub_watched::HubWatchedTransform;
 pub use library_interleave::LibraryInterleaveTransform;
-pub use restrictions::HubRestrictionTransform;
-pub use resolution_policy::{CollectionVisibilityTransform, ResolutionPolicyTransform};
-
-use crate::{
-    models::*,
-    plex_client::{PlexClient},
+pub use media_style::MediaStyleTransform;
+pub use resolution_policy::{
+    CollectionVisibilityTransform, ResolutionPolicyTransform,
 };
+pub use restrictions::HubRestrictionTransform;
+pub use user_state::UserStateTransform;
 
-use async_trait::async_trait;
+use crate::{models::*, plex_client::PlexClient};
+
 use async_recursion::async_recursion;
+use async_trait::async_trait;
 use futures_util::{
     future::{self},
     StreamExt,
@@ -45,7 +44,7 @@ pub trait Transform: Send + Sync + 'static {
         //item: MetaData,
         plex_client: PlexClient,
         options: PlexContext,
-    //) -> Option<MediaContainer> {
+        //) -> Option<MediaContainer> {
     ) {
     }
     async fn transform_mediacontainer(
@@ -73,7 +72,6 @@ pub trait Transform: Send + Sync + 'static {
         true
     }
 }
-
 
 // #[derive(TypedBuilder)]
 // #[derive(Default)]
@@ -110,7 +108,7 @@ impl TransformBuilder {
         let children = container.media_container.children_mut();
         //let new_children = self.apply_to_metadata(children).await;
         //container.media_container.set_children(new_children);
-        
+
         for t in self.transforms.clone() {
             let futures =
                 container.media_container.children_mut().iter_mut().map(
@@ -122,7 +120,7 @@ impl TransformBuilder {
                         )
                     },
                 );
-             
+
             future::join_all(futures).await;
             //for k in container.media_container.children_mut()
 
@@ -149,7 +147,7 @@ impl TransformBuilder {
             );
         }
     }
-    
+
     pub async fn apply_to(
         self,
         container: &mut MediaContainerWrapper<MediaContainer>,
@@ -160,31 +158,36 @@ impl TransformBuilder {
         for t in self.transforms.clone() {
             //dbg!(&filter_childs);
             for child in container.media_container.children_mut() {
-                 //if filter_childs.contains(child.key.clone().unwrap()) {
-                 //  continue;
-                 //} 
-                 //dbg!(&child.rating_key);
-                 //dbg!(&child.key);
-                 if !t.filter_metadata(
+                //if filter_childs.contains(child.key.clone().unwrap()) {
+                //  continue;
+                //}
+                //dbg!(&child.rating_key);
+                //dbg!(&child.key);
+                if !t
+                    .filter_metadata(
                         child.clone(),
                         self.plex_client.clone(),
                         self.options.clone(),
                     )
                     .await
-                 {
+                {
                     //childs.remove(idx);
                     filter_childs.push(child.key.clone().unwrap());
-                    continue
-                 }
-                 t.transform_metadata(
-                            child,
-                            self.plex_client.clone(),
-                            self.options.clone(),
-                        ).await;
-                //if 
+                    continue;
+                }
+                t.transform_metadata(
+                    child,
+                    self.plex_client.clone(),
+                    self.options.clone(),
+                )
+                .await;
+                //if
                 //idx = idx + 1;
             }
-            container.media_container.children_mut().retain(|x| !x.key.is_some() || !filter_childs.contains(&x.key.clone().unwrap()));
+            container.media_container.children_mut().retain(|x| {
+                !x.key.is_some()
+                    || !filter_childs.contains(&x.key.clone().unwrap())
+            });
             //item.children_mut().retain(|x| !x.is_watched());
             //future::join_all(futures).await;
 
@@ -235,10 +238,7 @@ pub fn hero_meta() -> Meta {
             },
             DisplayField {
                 r#type: Some("show".to_string()),
-                fields: vec![
-                    "title".to_string(),
-                    "childCount".to_string(),
-                ],
+                fields: vec!["title".to_string(), "childCount".to_string()],
             },
             DisplayField {
                 r#type: Some("clip".to_string()),

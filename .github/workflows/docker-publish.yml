@@ -1,5 +1,8 @@
 name: docker-publish
 
+# Trusted pipeline: only runs on pushes to `main` (or manual dispatch), so it
+# is safe to build and publish images. Validation (fmt/clippy/test) runs first
+# so broken code can never reach a published image.
 on:
   push:
     branches: [main]
@@ -10,7 +13,29 @@ permissions:
   packages: write
 
 jobs:
+  validate:
+    name: Validate (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features
+
+      - name: Test
+        run: cargo test --all-targets
+
   build:
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

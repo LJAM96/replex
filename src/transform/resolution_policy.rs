@@ -64,7 +64,8 @@ impl Transform for ResolutionPolicyTransform {
         plex_client: PlexClient,
         _options: PlexContext,
     ) {
-        let (policy, identity) = match Self::current_policy(&plex_client).await {
+        let (policy, identity) = match Self::current_policy(&plex_client).await
+        {
             Ok((policy, identity)) => (policy, identity),
             Err(_) => {
                 // Fail closed: strip every version so nothing playable leaks.
@@ -83,7 +84,12 @@ impl Transform for ResolutionPolicyTransform {
         // Record part permissions before stripping so direct /library/parts
         // requests can be validated even for items never played. Scoped to
         // this account and its current policy; never shared across users.
-        crate::plex_client::cache_part_policy(&item.media, &policy, &identity.uuid).await;
+        crate::plex_client::cache_part_policy(
+            &item.media,
+            &policy,
+            &identity.uuid,
+        )
+        .await;
 
         let before = count_media(item);
         strip_media_recursive(item, &policy);
@@ -106,7 +112,8 @@ impl Transform for ResolutionPolicyTransform {
         plex_client: PlexClient,
         _options: PlexContext,
     ) -> bool {
-        let (policy, _identity) = match Self::current_policy(&plex_client).await {
+        let (policy, _identity) = match Self::current_policy(&plex_client).await
+        {
             Ok((policy, identity)) => (policy, identity),
             Err(_) => {
                 let config: Config = Config::figment().extract().unwrap();
@@ -155,7 +162,8 @@ impl Transform for ResolutionPolicyTransform {
     ) -> bool {
         // Hubs wrap their items in nested metadata; a hub whose entire
         // content is blocked should disappear too.
-        let (policy, _identity) = match Self::current_policy(&plex_client).await {
+        let (policy, _identity) = match Self::current_policy(&plex_client).await
+        {
             Ok((policy, identity)) => (policy, identity),
             Err(_) => return true, // item-level fail-closed already handled
         };

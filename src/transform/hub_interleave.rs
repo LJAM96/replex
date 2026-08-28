@@ -1,9 +1,4 @@
-use crate::{
-    config::Config,
-    models::*,
-    plex_client::{PlexClient},
-    utils::*,
-};
+use crate::{config::Config, models::*, plex_client::PlexClient, utils::*};
 
 use super::Transform;
 use async_trait::async_trait;
@@ -22,7 +17,7 @@ impl Transform for HubInterleaveTransform {
     ) -> MediaContainer {
         let config: Config = Config::figment().extract().unwrap();
         let mut new_hubs: Vec<MetaData> = vec![];
-        
+
         if !config.interleave {
             return item;
         }

@@ -243,10 +243,18 @@ async fn playback_enforcement_scenarios() {
             .body(r#"{"MediaContainer":{}}"#);
     });
 
-    let status =
-        send_decision(&service, "jodie-token", "mediaIndex=0&scn=7&maxVideoBitrate=20000", None).await;
+    let status = send_decision(
+        &service,
+        "jodie-token",
+        "mediaIndex=0&scn=7&maxVideoBitrate=20000",
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(capped.hits() >= 1, "bitrate must be capped to the policy max");
+    assert!(
+        capped.hits() >= 1,
+        "bitrate must be capped to the policy max"
+    );
 
     // --- bitrate cap: request below cap is left alone ---
     let below = mock.mock(|when, then| {
@@ -258,8 +266,13 @@ async fn playback_enforcement_scenarios() {
             .body(r#"{"MediaContainer":{}}"#);
     });
 
-    let status =
-        send_decision(&service, "jodie-token", "mediaIndex=0&scn=8&maxVideoBitrate=2000", None).await;
+    let status = send_decision(
+        &service,
+        "jodie-token",
+        "mediaIndex=0&scn=8&maxVideoBitrate=2000",
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(below.hits() >= 1, "lower requests must not be raised");
 
@@ -277,8 +290,13 @@ async fn playback_enforcement_scenarios() {
 
     // capped-only is resolution-unlimited: mediaIndex=1 (4K) passes through,
     // but the bitrate is capped.
-    let status =
-        send_decision(&service, "capped-token", "mediaIndex=1&scn=9&maxVideoBitrate=50000", None).await;
+    let status = send_decision(
+        &service,
+        "capped-token",
+        "mediaIndex=1&scn=9&maxVideoBitrate=50000",
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(
         capped_only.hits() >= 1,
@@ -297,7 +315,9 @@ async fn playback_enforcement_scenarios() {
             .body(r#"{"MediaContainer":{}}"#);
     });
 
-    let status = send_decision(&service, "capped-token", "mediaIndex=1&scn=10", None).await;
+    let status =
+        send_decision(&service, "capped-token", "mediaIndex=1&scn=10", None)
+            .await;
     assert_eq!(status, StatusCode::OK);
     assert!(injected.hits() >= 1, "cap must be injected when absent");
 }

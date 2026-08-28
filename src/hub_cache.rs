@@ -11,11 +11,11 @@
 //!   request then serves instantly while refreshing behind the scenes, which
 //!   keeps Continue Watching / On Deck accurate within seconds of activity.
 
+use crate::config::Config;
 use crate::models::*;
 use crate::plex_client::PlexClient;
-use crate::utils::from_reqwest_response;
-use crate::config::Config;
 use crate::routes::PHOTO_CACHE;
+use crate::utils::from_reqwest_response;
 use moka::future::Cache;
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
@@ -91,7 +91,11 @@ pub fn hub_cache_key(key_path: &str, token: Option<&str>) -> String {
 }
 
 /// Pure staleness decision so tests can inject timestamps.
-fn is_older_than(fetched_at: Option<Instant>, max_age: Duration, now: Instant) -> bool {
+fn is_older_than(
+    fetched_at: Option<Instant>,
+    max_age: Duration,
+    now: Instant,
+) -> bool {
     match fetched_at {
         Some(t) => now.duration_since(t) >= max_age,
         None => true,
@@ -99,11 +103,7 @@ fn is_older_than(fetched_at: Option<Instant>, max_age: Duration, now: Instant) -
 }
 
 pub(crate) async fn is_stale(cache_key: &str, max_age: Duration) -> bool {
-    is_older_than(
-        HUB_FETCHED_AT.get(cache_key).await,
-        max_age,
-        Instant::now(),
-    )
+    is_older_than(HUB_FETCHED_AT.get(cache_key).await, max_age, Instant::now())
 }
 
 /// Mark every cached hub payload stale by dropping its age record. Payloads
@@ -115,7 +115,11 @@ pub(crate) fn mark_all_hubs_stale() {
 
 /// Kick off (or skip, if already running/rate limited) a single-flight
 /// background refresh for one cached hub payload. Never blocks the caller.
-pub(crate) fn spawn_hub_refresh(client: PlexClient, key_path: String, cache_key: String) {
+pub(crate) fn spawn_hub_refresh(
+    client: PlexClient,
+    key_path: String,
+    cache_key: String,
+) {
     tokio::spawn(async move {
         if let Some(t) = HUB_LAST_REFRESH_ATTEMPT.get(&cache_key).await {
             if t.elapsed() < REFRESH_MIN_INTERVAL {
@@ -131,19 +135,25 @@ pub(crate) fn spawn_hub_refresh(client: PlexClient, key_path: String, cache_key:
 
         refresh_hub_entry(&client, &key_path, &cache_key).await;
 
-        let mut inflight = REFRESH_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inflight =
+            REFRESH_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
         inflight.remove(&cache_key);
     });
 }
 
 fn claim_refresh(cache_key: &str) -> bool {
-    let mut inflight = REFRESH_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+    let mut inflight =
+        REFRESH_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
     inflight.insert(cache_key.to_string())
 }
 
 /// Re-fetch one hub payload from upstream and swap it into the cache. On any
 /// failure the previous payload is kept: stale data beats no data.
-async fn refresh_hub_entry(client: &PlexClient, key_path: &str, cache_key: &str) {
+async fn refresh_hub_entry(
+    client: &PlexClient,
+    key_path: &str,
+    cache_key: &str,
+) {
     tracing::debug!(path = %key_path, "background hub refresh started");
     match fetch_hubs_payload(client, key_path).await {
         Ok(payload) => {
@@ -179,7 +189,8 @@ pub(crate) async fn fetch_hubs_payload(
     let r = if r.status() == reqwest::StatusCode::NOT_FOUND
         && key_path.starts_with("/hubs/home")
     {
-        let fallback_path = key_path.replacen("/hubs/home", "/hubs/promoted", 1);
+        let fallback_path =
+            key_path.replacen("/hubs/home", "/hubs/promoted", 1);
         tracing::info!(
             path = %key_path,
             fallback = %fallback_path,
@@ -216,14 +227,16 @@ pub(crate) async fn fetch_hubs_payload(
 /// `/:/unscrobble`) and playback stopping are the events that materially
 /// change Continue Watching membership and ordering; everything else ages out
 /// through the normal staleness window.
-pub(crate) fn is_playback_invalidation(path: &str, query: Option<&str>) -> bool {
+pub(crate) fn is_playback_invalidation(
+    path: &str,
+    query: Option<&str>,
+) -> bool {
     if path.ends_with("/:/scrobble") || path.ends_with("/:/unscrobble") {
         return true;
     }
     if path.ends_with("/:/timeline") {
-        let state = query.and_then(|q| {
-            q.split('&').find_map(|p| p.strip_prefix("state="))
-        });
+        let state = query
+            .and_then(|q| q.split('&').find_map(|p| p.strip_prefix("state=")));
         return matches!(state, Some("stopped"));
     }
     false
@@ -243,7 +256,8 @@ pub(crate) fn is_playback_invalidation(path: &str, query: Option<&str>) -> bool 
 /// slot (web clients page through them individually), the aggregate slot,
 /// continue watching and the /hubs/home fallback.
 async fn warm_paths(host: &str, token: &str) -> Vec<String> {
-    let sections_url = format!("{}/library/sections", host.trim_end_matches('/'));
+    let sections_url =
+        format!("{}/library/sections", host.trim_end_matches('/'));
     tracing::debug!(url = %sections_url, "warmer listing sections");
     let resp = match reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -273,7 +287,10 @@ async fn warm_paths(host: &str, token: &str) -> Vec<String> {
     struct Section {
         key: String,
     }
-    let all = match resp.json::<crate::models::MediaContainerWrapper<Sections>>().await {
+    let all = match resp
+        .json::<crate::models::MediaContainerWrapper<Sections>>()
+        .await
+    {
         Ok(s) => {
             let dirs: Vec<String> = s
                 .media_container
@@ -327,9 +344,18 @@ async fn warm_cycle() {
         client_identifier: Some("replex-warmer".to_string()),
         ..Default::default()
     };
-    let client = PlexClient::from_context(&context);
+    let client = match PlexClient::from_context(&context) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build Plex client from warmer context");
+            return;
+        }
+    };
 
-    let mut warmed: Vec<(String, crate::models::MediaContainerWrapper<crate::models::MediaContainer>)> = Vec::new();
+    let mut warmed: Vec<(
+        String,
+        crate::models::MediaContainerWrapper<crate::models::MediaContainer>,
+    )> = Vec::new();
 
     for path in warm_paths(&host, &token).await {
         let fetch_path = if path.contains('?') {
@@ -355,7 +381,10 @@ async fn warm_cycle() {
         }
         match fetch_hubs_payload(&client, &fetch_path).await {
             Ok(payload) => {
-                client.cache.insert(cache_key.clone(), payload.clone()).await;
+                client
+                    .cache
+                    .insert(cache_key.clone(), payload.clone())
+                    .await;
                 track_fetched(cache_key.clone()).await;
                 warmed.push((fetch_path.clone(), payload));
                 tracing::debug!(path = %fetch_path, "warmed hub payload");
@@ -364,7 +393,8 @@ async fn warm_cycle() {
                 tracing::warn!(error = %e, path = %fetch_path, "warm fetch failed");
             }
         }
-        let mut inflight = REFRESH_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inflight =
+            REFRESH_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
         inflight.remove(&cache_key);
     }
 
@@ -389,8 +419,9 @@ async fn warm_cycle() {
                     Some(q) => q,
                     None => continue,
                 };
-                let key =
-                    crate::routes::canonical_photo_key(&format!("/photo/:/transcode?{tq}"));
+                let key = crate::routes::canonical_photo_key(&format!(
+                    "/photo/:/transcode?{tq}"
+                ));
                 if PHOTO_CACHE.get(&key).await.is_some() {
                     continue;
                 }
@@ -403,18 +434,21 @@ async fn warm_cycle() {
                             .map(|s| s.to_string());
                         match r.bytes().await {
                             Ok(bytes) if bytes.len() <= 4 * 1024 * 1024 => {
-                                PHOTO_CACHE.insert(
-                                    key.clone(),
-                                    crate::routes::CachedImage {
-                                        content_type: ct.clone(),
-                                        cache_control: Some(
-                                            "public, max-age=259200".to_string(),
-                                        ),
-                                        body: bytes.to_vec(),
-                                    },
-                                )
-                                .await;
-                                let _ = crate::disk_cache::put(&key, &bytes).await;
+                                PHOTO_CACHE
+                                    .insert(
+                                        key.clone(),
+                                        crate::routes::CachedImage {
+                                            content_type: ct.clone(),
+                                            cache_control: Some(
+                                                "public, max-age=259200"
+                                                    .to_string(),
+                                            ),
+                                            body: bytes.to_vec(),
+                                        },
+                                    )
+                                    .await;
+                                let _ =
+                                    crate::disk_cache::put(&key, &bytes).await;
                                 budget -= 1;
                                 fetched += 1;
                             }
@@ -439,19 +473,44 @@ async fn warm_cycle() {
 async fn warm_library_pages(client: &PlexClient, host: &str, token: &str) {
     let sections = {
         let url = format!("{}/library/sections", host.trim_end_matches('/'));
-        let resp = match reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap()
-            .get(&url).header("Accept", "application/json").header("X-Plex-Token", token).send().await {
+        let resp = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap()
+            .get(&url)
+            .header("Accept", "application/json")
+            .header("X-Plex-Token", token)
+            .send()
+            .await
+        {
             Ok(r) if r.status() == reqwest::StatusCode::OK => r,
             _ => return,
         };
-        #[derive(serde::Deserialize)] struct Sections { #[serde(rename = "Directory", default)] directory: Vec<Section> }
-        #[derive(serde::Deserialize)] struct Section { key: String }
-        match resp.json::<crate::models::MediaContainerWrapper<Sections>>().await {
-            Ok(s) => s.media_container.directory.into_iter().map(|d| d.key).collect::<Vec<_>>(),
+        #[derive(serde::Deserialize)]
+        struct Sections {
+            #[serde(rename = "Directory", default)]
+            directory: Vec<Section>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Section {
+            key: String,
+        }
+        match resp
+            .json::<crate::models::MediaContainerWrapper<Sections>>()
+            .await
+        {
+            Ok(s) => s
+                .media_container
+                .directory
+                .into_iter()
+                .map(|d| d.key)
+                .collect::<Vec<_>>(),
             Err(_) => return,
         }
     };
-    if sections.is_empty() { return; }
+    if sections.is_empty() {
+        return;
+    }
     for section in &sections {
         let section_id = section.as_str();
         for start in (0..250).step_by(50) {
@@ -462,7 +521,8 @@ async fn warm_library_pages(client: &PlexClient, host: &str, token: &str) {
             // user-scoped: this warms the admin account's scope, which is
             // the correct behaviour — library payloads embed per-account
             // watch state and must never be shared across accounts.
-            let cache_key = crate::routes::library_cache_key_for(&path, Some(&token));
+            let cache_key =
+                crate::routes::library_cache_key_for(&path, Some(&token));
             if crate::disk_cache::get(&cache_key).await.is_some() {
                 continue;
             }
@@ -574,8 +634,14 @@ mod tests {
 
         // Warmer and request path must derive identical keys from the same
         // inputs, or warmed entries would land where nothing looks them up.
-        let warm = hub_cache_key("/hubs/promoted?contentdirectoryid=23", Some("admin"));
-        let request = hub_cache_key("/hubs/promoted?contentdirectoryid=23", Some("admin"));
+        let warm = hub_cache_key(
+            "/hubs/promoted?contentdirectoryid=23",
+            Some("admin"),
+        );
+        let request = hub_cache_key(
+            "/hubs/promoted?contentdirectoryid=23",
+            Some("admin"),
+        );
         assert_eq!(warm, request);
     }
 
@@ -597,11 +663,16 @@ mod tests {
         }
     }
 
-    async fn seed(container_json: &str) -> MediaContainerWrapper<MediaContainer> {
+    async fn seed(
+        container_json: &str,
+    ) -> MediaContainerWrapper<MediaContainer> {
         serde_json::from_str(container_json).unwrap()
     }
 
-    fn mock_server_for(path: &'static str, status: u16) -> httpmock::MockServer {
+    fn mock_server_for(
+        path: &'static str,
+        status: u16,
+    ) -> httpmock::MockServer {
         let server = httpmock::MockServer::start();
         let _ = server.mock(|when, then| {
             when.method(httpmock::Method::GET).path(path);

@@ -1,9 +1,5 @@
+use crate::{config::Config, models::*, plex_client::PlexClient};
 use async_trait::async_trait;
-use crate::{
-    config::Config,
-    models::*,
-    plex_client::{PlexClient},
-};
 
 use super::Transform;
 #[derive(Default)]
@@ -18,7 +14,7 @@ impl Transform for HubRestrictionTransform {
         options: PlexContext,
     ) -> bool {
         let config: Config = Config::figment().extract().unwrap();
-        
+
         if !config.hub_restrictions {
             return true;
         }
@@ -26,17 +22,23 @@ impl Transform for HubRestrictionTransform {
         if item.is_hub() && !item.is_collection_hub() {
             return true;
         }
-        
+
         if !item.is_hub() {
             return true;
         }
-        
+
         if item.size.unwrap() == 0 {
             return false;
         }
 
         let section_id: i64 = item.library_section_id.unwrap_or_else(|| {
-            item.hub_identifier.clone().unwrap().split('.').collect::<Vec<&str>>()[2].parse().unwrap()
+            item.hub_identifier
+                .clone()
+                .unwrap()
+                .split('.')
+                .collect::<Vec<&str>>()[2]
+                .parse()
+                .unwrap()
         });
 
         //let start = Instant::now();

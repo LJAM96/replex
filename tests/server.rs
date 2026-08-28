@@ -1,4 +1,3 @@
-
 // use httpmock::prelude::*;
 // use pretty_assertions::assert_eq;
 // extern crate jsonxf;
@@ -44,7 +43,7 @@
 //             .header("content-type", "application/json")
 //             .body_from_file("tests/mock/in/library_collections_254688.json");
 //     });
-    
+
 //     let _ = mock_server.mock(|when, then| {
 //         when.method(GET)
 //             .path("/hubs/promoted")
