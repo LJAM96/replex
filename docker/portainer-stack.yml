@@ -34,11 +34,12 @@ services:
       REPLEX_TOKEN: ${REPLEX_TOKEN}
 
       # --- per-user resolution restrictions ---
-      # NOTE: these limits are a convenience feature (bandwidth saving,
-      # device matching), NOT a security boundary. Clients that can reach
-      # the Plex server directly and hold a token the server accepts can
-      # bypass them. For hard enforcement the Plex origin must be
-      # unreachable by restricted clients.
+      # These limits are ENFORCED by Replex for any client that reaches Plex
+      # through Replex: restricted accounts' streams are proxied through Replex
+      # (never 302-redirected to the origin) and unknown/direct part requests
+      # are blocked. They are NOT a hard boundary against a client that can
+      # reach the Plex origin directly. For hard enforcement, firewall the Plex
+      # origin so only Replex can talk to it.
       REPLEX_RESOLUTION_POLICY_ENABLED: "true"
       REPLEX_RESOLUTION_DEFAULT: "unlimited"
       REPLEX_RESOLUTION_POLICY_FAIL_CLOSED: "true"
@@ -53,15 +54,18 @@ services:
       REPLEX_HERO_ROWS: "home.continue"
 
       # --- transport ---
-      # Streams are redirected straight to the Plex origin for video bytes.
-      # Fine for convenience-grade resolution limits (see note above); if you
-      # ever need hard enforcement, clients must not be able to reach Plex
-      # directly — proxy streams through Replex instead and firewall the
-      # origin.
+      # Unlimited accounts' video bytes are 302-redirected straight to the Plex
+      # origin for performance. Restricted accounts are ALWAYS proxied through
+      # Replex regardless of this flag, so their limit stays enforceable. Set
+      # REPLEX_REDIRECT_STREAMS to "false" to proxy every stream through Replex.
       REPLEX_REDIRECT_STREAMS: "true"
+      # Optional: extra account tokens for the internal warmer to pre-fetch, so
+      # accounts other than REPLEX_TOKEN also get cold-start-free hubs/library.
+      # Comma separated; leave empty to warm only the admin token.
+      REPLEX_WARM_TOKENS: ${REPLEX_WARM_TOKENS}
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    image: cloudflare/cloudflared:2026.8.2
     container_name: replex-tunnel
     restart: unless-stopped
     command: tunnel run
@@ -74,7 +78,7 @@ services:
   # large libraries. This sidecar quietly refreshes Replex's cache every
   # 25 minutes so human clients are always served the fast cached copy.
   cache-warmer:
-    image: curlimages/curl:latest
+    image: curlimages/curl:8.21.0
     container_name: replex-warmer
     restart: unless-stopped
     depends_on:

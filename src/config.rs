@@ -42,6 +42,12 @@ pub struct Config {
     /// hub payloads with the admin token. 0 disables warming.
     #[serde(default = "default_warm_interval")]
     pub warm_interval: u64,
+    /// Extra Plex tokens whose hubs/library the background warmer should
+    /// pre-fetch. Each token is warmed into its own user-scoped cache scope,
+    /// so accounts other than the configured admin also get cold-start-free
+    /// loads. When empty, only `token` (the admin) is warmed. Comma separated.
+    #[serde(default, deserialize_with = "deserialize_comma_seperated_string")]
+    pub warm_tokens: Option<Vec<String>>,
     #[serde(
         default = "default_as_true",
         deserialize_with = "figment::util::bool_from_str_or_int"

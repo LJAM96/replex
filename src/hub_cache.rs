@@ -324,62 +324,100 @@ async fn warm_paths(host: &str, token: &str) -> Vec<String> {
     paths
 }
 
-/// One warmer pass: fetch every canonical path that is missing or stale.
+/// Resolve the tokens the warmer should pre-fetch for. When `warm_tokens` is
+/// configured it is used verbatim; otherwise the admin `token` is warmed
+/// (previous behaviour). Each token is warmed into its own user-scoped cache
+/// scope so every configured account gets cold-start-free loads, not just the
+/// admin.
+fn warm_token_list(config: &Config) -> Vec<String> {
+    if let Some(tokens) = &config.warm_tokens {
+        if !tokens.is_empty() {
+            return tokens.clone();
+        }
+    }
+    match &config.token {
+        Some(t) => vec![t.clone()],
+        None => Vec::new(),
+    }
+}
+
+/// One warmer pass: for every configured token, pre-fetch that account's hubs
+/// (and poster thumbs) and library sections into the user-scoped cache scope.
 async fn warm_cycle() {
     let config: Config = Config::figment().extract().unwrap();
     if config.warm_interval == 0 {
         return;
     }
-    let Some(token) = config.token.clone() else {
-        tracing::debug!("warmer idle: no admin token configured");
-        return; // no admin token configured, nothing to warm with
-    };
     let Some(host) = config.host.clone() else {
         return;
     };
-    tracing::debug!("hub warmer cycle starting");
+    let tokens = warm_token_list(&config);
+    if tokens.is_empty() {
+        tracing::debug!("warmer idle: no tokens configured");
+        return;
+    }
+    // Section listing is token independent; resolve the canonical hub paths
+    // once with the first configured token.
+    let paths = warm_paths(&host, &tokens[0]).await;
+    for token in &tokens {
+        tracing::debug!(
+            scope = %token.chars().take(4).collect::<String>(),
+            "warmer cycle for account scope"
+        );
+        let context = crate::models::PlexContext {
+            token: Some(token.clone()),
+            client_identifier: Some("replex-warmer".to_string()),
+            ..Default::default()
+        };
+        let client = match PlexClient::from_context(&context) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to build Plex client from warmer token");
+                continue;
+            }
+        };
+        warm_hubs_for_token(&client, &paths, token).await;
+        warm_library_pages(&client, &host, token).await;
+    }
+}
 
-    let context = crate::models::PlexContext {
-        token: Some(token.clone()),
-        client_identifier: Some("replex-warmer".to_string()),
-        ..Default::default()
-    };
-    let client = match PlexClient::from_context(&context) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to build Plex client from warmer context");
-            return;
-        }
-    };
-
+/// Warm the hub payloads (and their poster thumbs) for a single account scope.
+/// The cache key embeds a hash of `token` so user-scoped hubs (Continue
+/// Watching, On Deck, home, promoted) land in the scope that account's own
+/// requests look up.
+async fn warm_hubs_for_token(
+    client: &PlexClient,
+    paths: &[String],
+    token: &str,
+) {
     let mut warmed: Vec<(
         String,
         crate::models::MediaContainerWrapper<crate::models::MediaContainer>,
     )> = Vec::new();
 
-    for path in warm_paths(&host, &token).await {
+    for path in paths {
         let fetch_path = if path.contains('?') {
-            format!("{}&includeGuids=1&count=50", path)
+            format!("{path}&includeGuids=1&count=50")
         } else {
-            format!("{}?includeGuids=1&count=50", path)
+            format!("{path}?includeGuids=1&count=50")
         };
         // Compute the cache key with the exact same logic client requests
-        // go through, so warmer entries land where lookups land. Passing
-        // the admin token keeps user-scoped hubs (Continue Watching, home,
-        // promoted) consistent with admin requests.
+        // go through, so warmer entries land where lookups land. Passing the
+        // account token keeps user-scoped hubs consistent with that account's
+        // requests.
         let cache_key = {
             let mut probe = salvo::http::Request::default();
             let uri: hyper::Uri = fetch_path.parse().expect("valid warm path");
             probe.set_uri(uri);
             crate::hub_cache::hub_cache_key(
                 &crate::routes::cache_key_for_request(&probe),
-                Some(&token),
+                Some(token),
             )
         };
         if !claim_refresh(&cache_key) {
             continue;
         }
-        match fetch_hubs_payload(&client, &fetch_path).await {
+        match fetch_hubs_payload(client, &fetch_path).await {
             Ok(payload) => {
                 client
                     .cache
@@ -466,8 +504,6 @@ async fn warm_cycle() {
     if fetched > 0 {
         tracing::info!(count = fetched, "poster prefetch complete");
     }
-
-    warm_library_pages(&client, &host, &token).await;
 }
 
 async fn warm_library_pages(client: &PlexClient, host: &str, token: &str) {
@@ -518,9 +554,10 @@ async fn warm_library_pages(client: &PlexClient, host: &str, token: &str) {
             // Derive the disk-cache key through the same canonical function
             // the request path uses (`routes::library_cache_key_for`), so
             // warmed entries land where live lookups happen. The key is
-            // user-scoped: this warms the admin account's scope, which is
-            // the correct behaviour — library payloads embed per-account
-            // watch state and must never be shared across accounts.
+            // user-scoped: this warms the account scope for the token the
+            // warmer is currently iterating, which is the correct behaviour —
+            // library payloads embed per-account watch state and must never
+            // be shared across accounts.
             let cache_key =
                 crate::routes::library_cache_key_for(&path, Some(&token));
             if crate::disk_cache::get(&cache_key).await.is_some() {
@@ -784,5 +821,47 @@ mod tests {
         ));
         // Unrelated paths never do.
         assert!(!is_playback_invalidation("/library/metadata/123", None));
+    }
+
+    #[test]
+    fn warm_token_list_uses_configured_tokens() {
+        let c: Config = figment::Figment::from(
+            figment::providers::Serialized::defaults(serde_json::json!({
+                "host": "http://localhost:32400",
+                "token": "admin-token",
+                "warm_tokens": "a,b,c",
+            })),
+        )
+        .extract()
+        .unwrap();
+        assert_eq!(
+            warm_token_list(&c),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn warm_token_list_falls_back_to_admin() {
+        let c: Config = figment::Figment::from(
+            figment::providers::Serialized::defaults(serde_json::json!({
+                "host": "http://localhost:32400",
+                "token": "admin-token",
+            })),
+        )
+        .extract()
+        .unwrap();
+        assert_eq!(warm_token_list(&c), vec!["admin-token".to_string()]);
+    }
+
+    #[test]
+    fn warm_token_list_empty_when_nothing_configured() {
+        let c: Config = figment::Figment::from(
+            figment::providers::Serialized::defaults(serde_json::json!({
+                "host": "http://localhost:32400",
+            })),
+        )
+        .extract()
+        .unwrap();
+        assert!(warm_token_list(&c).is_empty());
     }
 }

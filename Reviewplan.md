@@ -8,11 +8,16 @@
   `(verified user uuid, policy fingerprint, part id)`; Continue Watching /
   On Deck / home / promoted hubs are user-scoped by token hash, with warmer
   parity and unit tests (commit `0c34d9f`). The enforcement question was
-  decided: resolution limits are **convenience, not enforcement** — this is
-  now stated explicitly in `README.md` and `docker/portainer-stack.yml`
-  (including the stream-redirect caveat), so the direct-origin bypass is a
-  documented property of the deployment rather than an undocumented
-  contradiction.
+  decided and **implemented**: resolution limits are now enforced for any
+  client that reaches Plex *through* Replex. Restricted accounts' part and
+  transcode-session streams are proxied through Replex (never 302-redirected
+  to the Plex origin), and unknown/direct part requests are blocked with 403,
+  so a restricted client never learns the Plex origin URL. `REPLEX_REDIRECT_STREAMS`
+  now only affects **unlimited** accounts (302-redirect for performance); it
+  cannot bypass a restricted account's limit. This is documented in
+  `README.md` and `docker/portainer-stack.yml`, which still state the hard
+  requirement that the Plex origin be firewalled so only Replex can reach it
+  for true enforcement against a client with direct network access.
 - **P1 (all resolved).**
   1. Persistent library caching redesigned: the disk cache stores the RAW
      upstream payload (`library_cache_store`), and `library_cache_lookup`
@@ -20,13 +25,16 @@
      current policy on every hit. Corrupt entries are evicted and refetched
      (`disk_cache::remove`). `disk_cache::put` no longer drifts the size
      counter on overwrite.
-  2. Library warmer key mismatch fixed: one canonical function
-     (`routes::library_cache_key_for`) is used by both the request path and
-     the warmer; client-shaping noise (`X-Plex-*` metadata, field-trimming
-     params) is canonicalized away and misses fetch normalized supersets,
-     so warmed entries are consumed by real client requests. Keys are
-     user-scoped by token SHA-256 (raw library payloads embed per-account
-     watch state).
+   2. Library warmer key mismatch fixed: one canonical function
+      (`routes::library_cache_key_for`) is used by both the request path and
+      the warmer; client-shaping noise (`X-Plex-*` metadata, field-trimming
+      params) is canonicalized away and misses fetch normalized supersets,
+      so warmed entries are consumed by real client requests. Keys are
+      user-scoped by token SHA-256 (raw library payloads embed per-account
+      watch state). The warmer now pre-fetches **every** token listed in
+      `REPLEX_WARM_TOKENS` (defaulting to the admin `REPLEX_TOKEN`), so
+      accounts other than the admin also get cold-start-free hubs/library in
+      their own user-scoped scope, not just the admin.
   3. Cross-user integration tests added:
      `cross_user_library_sections_isolation` (unlimited vs 1080p account
      through the real router: per-account filtering, no shared cache scope,
@@ -37,8 +45,8 @@
 
 ## Verification
 
-Full suite green at time of writing: 51 tests passed, 0 failed (47 lib
-tests + playback, identity, direct_parts integration suites). Clippy clean
+Full suite green at time of writing: 50 lib tests passed, 0 failed
+(playback, identity, direct_parts integration suites separate). Clippy clean
 on all files touched by these fixes.
 
 ## Still open (P2)
@@ -47,10 +55,14 @@ None remaining in the working tree (uncommitted). All P2 items below were
 implemented against `main`:
 
 - **Atomic disk-cache writes.** `disk_cache::put_full` writes to a
-  `<key>.tmp` file and swaps it into place with an atomic `rename`, so a
-  crash or concurrent read can never observe a half-written response
-  (`src/disk_cache.rs`). The size counter still subtracts the old entry
-  before counting the new one.
+   `<key>.tmp` file and swaps it into place with an atomic `rename`, so a
+   crash or concurrent read can never observe a half-written response
+   (`src/disk_cache.rs`). The size counter still subtracts the old entry
+   before counting the new one. The remaining synchronous filesystem work
+   the original review flagged — the `walkdir` LRU scan in `ensure_capacity`
+   and `init`, and the `filetime::set_file_mtime` touch on read — now runs
+   on `tokio::task::spawn_blocking` so a large cache can no longer stall a
+   Tokio worker.
 - **Persisted photo content type.** Disk cache entries are now a small
   record (`CacheRecord`: body + `content_type`). `photo_cache_hoop` stores
   the upstream content type and replays it on a disk hit, so WebP/PNG/etc.
@@ -76,11 +88,19 @@ implemented against `main`:
   `docker-publish.yml` (main-only) runs the same validation as a required
   job before building/pushing the image.
 - **Docker `USER` / healthcheck hardening.** Both `Dockerfile` and
-  `Dockerfile.github` install `curl`, create an unprivileged UID `10001`,
-  add a `/ping` `HEALTHCHECK`, and write cache to a chowned `/data`. The
-  Portainer stack runs the container `read_only` with a `/tmp` tmpfs and a
-  `replex-cache:/data` volume, and the example `REPLEX_HOST` / usernames
-  were replaced with generic placeholders.
+   `Dockerfile.github` install `curl`, create an unprivileged UID `10001`,
+   add a `/ping` `HEALTHCHECK`, and write cache to a chowned `/data`. The
+   Portainer stack runs the container `read_only` with a `/tmp` tmpfs and a
+   `replex-cache:/data` volume, and the example `REPLEX_HOST` / usernames
+   were replaced with generic placeholders. Sidecar images are now pinned to
+   explicit versions (`cloudflare/cloudflared:2026.8.2`,
+   `curlimages/curl:8.21.0`) instead of `:latest`.
+
+- **`main` branch protection (repo setting, not code).** The review asked for
+   required status checks / protected `main`. This is a GitHub repository
+   setting and was not applied via code — it still needs a repo admin to
+   enable branch protection requiring the `pr.yml` validation job before
+   merge.
 
 ---
 

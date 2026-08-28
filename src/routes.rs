@@ -121,7 +121,11 @@ pub fn route() -> Router {
         .hoop(Compression::new().enable_gzip(CompressionLevel::Fastest));
     // .hoop(affix::insert("script_engine", Arc::new(script_engine)));
 
-    if config.redirect_streams {
+    // Register the policy-gated stream handler whenever the policy is enabled
+    // (so restricted accounts are proxied/enforced) OR when direct redirects
+    // are requested (legacy behaviour for unlimited accounts). When neither
+    // applies the generic proxy path serves streams with no policy check.
+    if config.redirect_streams || config.resolution_policy_enabled {
         router = router
             .push(
                 Router::with_path(
@@ -897,17 +901,36 @@ async fn perform_stream_redirect(req: &mut Request, res: &mut Response) {
     res.render(Redirect::temporary(redirect_url));
 }
 
-/// Stream redirection gated by the resolution policy.
+/// Proxy a stream through Replex instead of 302-redirecting the client to the
+/// Plex origin. Used for restricted accounts so the byte path stays behind the
+/// policy check and the client never learns the Plex origin URL — required for
+/// resolution limits to be enforceable. The upstream fetch reuses the
+/// requesting account's own token, so per-account watch state is preserved.
+async fn proxy_stream_through_replex(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+    ctrl: &mut FlowCtrl,
+) {
+    do_proxy_request(req, res, depot, ctrl).await;
+    ctrl.skip_rest();
+}
+
+/// Stream gating by the resolution policy.
 ///
-/// Order matters: authenticate, apply policy, and only then redirect.
-/// - Policy disabled: legacy behaviour (plain redirect).
-/// - Unrestricted account: plain redirect.
-/// - `/library/parts` requests: the part id is checked against the part
-///   policy cache; prohibited parts get 403. Unknown parts are rejected only
-///   when `strict_stream_guard` is enabled.
-/// - Transcode session requests: identity must verify (fail closed), but no
-///   per-part validation is possible; sessions themselves are created via
-///   the enforced decision endpoint.
+/// Order matters: authenticate, apply policy, and only then serve the bytes.
+/// - Policy disabled: legacy behaviour (plain 302 redirect to the origin).
+/// - Unrestricted account: plain 302 redirect (no limit applies).
+/// - Restricted account: the bytes are proxied THROUGH Replex, never handed
+///   the Plex origin URL, so the limit stays enforceable. `/library/parts`
+///   requests are checked against the part policy cache; prohibited parts get
+///   403 and unknown parts are blocked too (a restricted account may only
+///   stream parts Replex has seen and permitted).
+/// - Transcode session requests: identity must verify (fail closed), then the
+///   session is proxied through Replex like any other restricted stream.
+///
+/// NOTE: enforcement only holds if clients cannot reach the Plex origin
+/// directly. Deploy Replex as the sole path to Plex (see README).
 #[handler]
 async fn protected_redirect_stream(
     req: &mut Request,
@@ -960,13 +983,15 @@ async fn protected_redirect_stream(
         &identity,
     );
     if policy.is_unrestricted() {
+        // Unlimited accounts keep the direct-origin redirect for performance;
+        // no resolution limit applies to them.
         perform_stream_redirect(req, res).await;
         return;
     }
 
-    // Direct media part request: validate against known part permissions.
-    // The lookup is scoped to THIS account and its current policy, so one
-    // account's cached decision can never authorise another's request.
+    // Restricted account: the stream MUST stay behind Replex so the policy
+    // decision is enforced and the client never learns the Plex origin URL. A
+    // direct 302 to the origin would let the client bypass the limit entirely.
     if let Some(part_id) = req.param::<i64>("partid") {
         let part_key = crate::plex_client::part_policy_key(
             &identity.uuid,
@@ -978,9 +1003,9 @@ async fn protected_redirect_stream(
                 tracing::debug!(
                     username = %identity.username,
                     part_id = part_id,
-                    "Permitted part requested"
+                    "Permitted part requested; proxying through Replex"
                 );
-                perform_stream_redirect(req, res).await;
+                proxy_stream_through_replex(req, depot, res, ctrl).await;
             }
             Some(false) => {
                 tracing::info!(
@@ -992,28 +1017,20 @@ async fn protected_redirect_stream(
                 res.status_code(StatusCode::FORBIDDEN);
             }
             None => {
-                if config.strict_stream_guard {
-                    tracing::info!(
-                        username = %identity.username,
-                        part_id = part_id,
-                        "Unknown part rejected by strict stream guard"
-                    );
-                    res.status_code(StatusCode::FORBIDDEN);
-                } else {
-                    tracing::debug!(
-                        username = %identity.username,
-                        part_id = part_id,
-                        "Unknown part allowed (strict stream guard disabled)"
-                    );
-                    perform_stream_redirect(req, res).await;
-                }
+                tracing::info!(
+                    username = %identity.username,
+                    part_id = part_id,
+                    "Unknown part blocked for restricted account (enforcement)"
+                );
+                res.status_code(StatusCode::FORBIDDEN);
             }
         }
         return;
     }
 
-    // Transcode session request: authenticated, nothing else to validate.
-    perform_stream_redirect(req, res).await
+    // Transcode session request for a restricted account: proxy through Replex
+    // so the byte path is enforced too.
+    proxy_stream_through_replex(req, depot, res, ctrl).await
 }
 
 // Google tv requests some weird thumbnail for hero elements. Let fix that

@@ -94,10 +94,11 @@ Settings are set via [environment variables](https://kinsta.com/knowledgebase/wh
 | REPLEX_VIDEO_TRANSCODE_FALLBACK_FOR    |     | If the selected media triggers a video transcode. Fallback to another version of the media. Only triggers on video transcoding. Remuxing is still allowed. <br />Options are "4k" and "1080". <br /> <br /> Example if  REPLEX_VIDEO_TRANSCODE_FALLBACK_FOR is set to "4k" then 4k transcodes will fallback to another version if avaiable |
 | REPLEX_AUTO_SELECT_VERSION    | false    | If you have multiple versions of a media item then this setting will choose the one thats closest to the client resolution. So a 1080p TV will get the 1080P version while 4k gets the 4k version. A user can still override this by selecting a different version from the client.   |
 | REPLEX_DISABLE_RELATED  | false | See: https://github.com/lostb1t/replex/issues/26.        |
-| REPLEX_REDIRECT_STREAMS  | false    | Redirect streams to another endpoint.                                      |
+| REPLEX_REDIRECT_STREAMS  | false    | For **unlimited** accounts, 302-redirect stream bytes directly to the Plex origin (best performance). Restricted accounts are **always proxied through Replex** regardless of this setting, so their resolution limit stays enforceable. Set `false` to proxy every stream. |
 | REPLEX_REDIRECT_STREAMS_HOST  | REPLEX_HOST    | Alternative streams endpoint                                         |
 | REPLEX_CACHE_TTL          | 1800    	 | Time to live for general caches in seconds. Set to 0 to disable (higly recommended to keep enabled besides testing purposes).  |
 | REPLEX_WARM_INTERVAL      | 300    	 | Seconds between background warmer cycles that pre-fetch hot hub payloads with the admin token so clients never pay the slow cold fetch. 0 disables warming.  |
+| REPLEX_WARM_TOKENS      |    	 | Comma separated list of extra Plex tokens to pre-warm. The warmer fetches each token's hubs/library into its own user-scoped cache scope, so accounts other than the configured admin also get cold-start-free loads. When empty, only `REPLEX_TOKEN` (admin) is warmed. |
 | REPLEX_HUB_STALE_TTL      | 300    	 | Hub payloads older than this (seconds) are served instantly while being refreshed in the background, so clients never wait on a slow upstream fetch. Playback changes seen through the proxy (scrobbles, playback stopping) mark all hubs stale immediately, keeping Continue Watching fresh within seconds. Set to 0 to disable the staleness layer.  |
 
 ## Hub caching and freshness
@@ -133,14 +134,14 @@ everything in one library. 1080p and 4K versions stay merged under the same
 item; restricted accounts simply never see or reach the versions above their
 limit.
 
-> **Intent: convenience, not enforcement.** These limits exist to save
-> bandwidth and match what restricted accounts' devices can actually use —
-> they are **not a security boundary**. Anyone with direct network access to
-> the Plex server and a token that the server accepts can construct requests
-> that bypass every restriction described below. If you need hard
-> enforcement, the Plex origin must be unreachable by restricted clients
-> (firewall it so only Replex can talk to it) — no proxy-side feature can
-> substitute for that.
+> **Intent: enforced by Replex, provided the Plex origin is isolated.** Restricted
+> accounts' streams are proxied through Replex and direct/unknown part requests
+> are blocked, so the limit holds for any client that talks to Plex *through*
+> Replex. It is still **not** a hard security boundary against a client that can
+> reach the Plex server directly: anyone with direct network access and an
+> accepted token can construct requests that bypass these restrictions. For hard
+> enforcement, firewall the Plex origin so only Replex can talk to it — Replex
+> alone cannot substitute for that network control.
 
 ```text
 REPLEX_RESOLUTION_POLICY_ENABLED=true
@@ -172,8 +173,8 @@ How it works:
   them; items that only exist above the limit disappear entirely.
 * Playback requests with a version above the limit are rewritten to the best
   permitted version; transcode fallback can never cross the limit.
-* Direct media part URLs belonging to prohibited versions return 403.
-* Accounts without a rule (or `unlimited`) behave exactly as stock Replex.
+* Direct media part URLs belonging to prohibited versions return 403; for restricted accounts, **unknown** parts (Replex has never seen in metadata/playback) are blocked too. Restricted accounts' part and transcode-session streams are proxied through Replex rather than 302-redirected, so the client never receives the Plex origin URL.
+* Accounts without a rule (or `unlimited`) behave exactly as stock Replex; their streams may be 302-redirected straight to the origin for performance when `REPLEX_REDIRECT_STREAMS` is enabled.
 
 Requirements and limitations:
 

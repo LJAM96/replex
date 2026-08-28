@@ -134,10 +134,16 @@ pub async fn get(key: &str) -> Option<Vec<u8>> {
 pub async fn get_full(key: &str) -> Option<CacheRecord> {
     let path = path_for_key(key);
     let data = tokio::fs::read(&path).await.ok()?;
-    let _ = filetime::set_file_mtime(
-        &path,
-        filetime::FileTime::from_system_time(std::time::SystemTime::now()),
-    );
+    // Touch on read (LRU ordering) off the async runtime: set_file_mtime is a
+    // synchronous syscall that would otherwise stall a Tokio worker.
+    let touch = path.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        filetime::set_file_mtime(
+            &touch,
+            filetime::FileTime::from_system_time(std::time::SystemTime::now()),
+        )
+    })
+    .await;
     decode_record(&data)
 }
 
@@ -212,22 +218,34 @@ async fn ensure_capacity() {
         return;
     }
     let dir = cache_dir();
-    let mut files = Vec::new();
-    let mut total: u64 = 0;
-    let walker = walkdir::WalkDir::new(&dir)
-        .into_iter()
-        .filter_map(|e| e.ok());
-    for entry in walker {
-        if entry.file_type().is_file() && is_cache_file(&entry) {
-            if let Ok(meta) = entry.metadata() {
-                let mtime = meta
-                    .modified()
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                total += meta.len();
-                files.push((mtime, entry.path().to_path_buf(), meta.len()));
+    // The directory scan is synchronous and can stall a Tokio worker for a
+    // large cache; run it on a blocking thread and return the reconciled size
+    // plus the (mtime, path, len) tuples to evict.
+    let scanned = match tokio::task::spawn_blocking(move || {
+        let mut files = Vec::new();
+        let mut total: u64 = 0;
+        for entry in walkdir::WalkDir::new(&dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_file() && is_cache_file(&entry) {
+                if let Ok(meta) = entry.metadata() {
+                    let mtime = meta
+                        .modified()
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    total += meta.len();
+                    files.push((mtime, entry.path().to_path_buf(), meta.len()));
+                }
             }
         }
-    }
+        (files, total)
+    })
+    .await
+    {
+        Ok(scanned) => scanned,
+        Err(_) => return,
+    };
+    let (mut files, total) = scanned;
     CURRENT_SIZE.store(total, Ordering::Relaxed);
     if total < clean_threshold(max_size()) {
         return;
@@ -246,16 +264,26 @@ async fn ensure_capacity() {
 pub async fn init() {
     let dir = cache_dir();
     let _ = tokio::fs::create_dir_all(&dir).await;
-    let mut total: u64 = 0;
-    for entry in walkdir::WalkDir::new(&dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_type().is_file() && is_cache_file(&entry) {
-            if let Ok(m) = entry.metadata() {
-                total += m.len();
+    // Reconcile the tracked size from disk on a blocking thread so startup
+    // never stalls the async runtime on a large existing cache.
+    let total: u64 = match tokio::task::spawn_blocking(move || {
+        let mut total: u64 = 0;
+        for entry in walkdir::WalkDir::new(&dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_file() && is_cache_file(&entry) {
+                if let Ok(m) = entry.metadata() {
+                    total += m.len();
+                }
             }
         }
-    }
+        total
+    })
+    .await
+    {
+        Ok(t) => t,
+        Err(_) => 0,
+    };
     CURRENT_SIZE.store(total, Ordering::Relaxed);
 }
