@@ -4,6 +4,7 @@ extern crate mime;
 use itertools::Itertools;
 // use futures_util::StreamExt;
 use crate::config::Config;
+use crate::state::AppState;
 use mime::Mime;
 use multimap::MultiMap;
 use salvo::prelude::*;
@@ -46,27 +47,20 @@ pub fn salvo_url_query_getter(req: &Request, _depot: &Depot) -> Option<String> {
 }
 
 // Proxy to plex instance
-pub fn default_proxy() -> Proxy<String, ReqwestClient> {
-    let config: Config = Config::figment().extract().unwrap();
-    let mut proxy = Proxy::new(
-        config.host.clone().unwrap(),
-        ReqwestClient::new(
-            reqwest::Client::builder()
-                .timeout(Duration::from_secs(60 * 200))
-                .build()
-                .unwrap(),
-        ),
-    );
+pub fn default_proxy(state: &AppState) -> Proxy<String, ReqwestClient> {
+    let host = state.config.host.clone().unwrap_or_default();
+    let mut proxy =
+        Proxy::new(host, ReqwestClient::new(state.proxy_http.clone()));
     proxy = proxy.url_path_getter(salvo_url_path_getter);
     proxy = proxy.url_query_getter(salvo_url_query_getter);
     proxy
 }
 
-pub fn proxy(upstream: String) -> Proxy<String, ReqwestClient> {
-    let mut proxy = Proxy::new(
-        upstream,
-        ReqwestClient::new(reqwest::Client::builder().build().unwrap()),
-    );
+pub fn proxy(
+    upstream: String,
+    client: reqwest::Client,
+) -> Proxy<String, ReqwestClient> {
+    let mut proxy = Proxy::new(upstream, ReqwestClient::new(client));
     proxy = proxy.url_path_getter(salvo_url_path_getter);
     proxy = proxy.url_query_getter(salvo_url_query_getter);
 
@@ -173,15 +167,11 @@ pub fn get_content_type_from_headers(
     let accept_header = headers.get("accept");
     let content_type_header = headers.get("content-type");
 
-    let content_type = if content_type_header.is_some() {
-        content_type_header.unwrap()
-    } else if accept_header.is_some() {
-        accept_header.unwrap()
-    } else {
-        &default_header_value
-    }
-    .to_str()
-    .unwrap();
+    let content_type = content_type_header
+        .or(accept_header)
+        .unwrap_or(&default_header_value)
+        .to_str()
+        .unwrap_or("text/xml;charset=utf-8");
 
     match content_type {
         x if x.contains("application/json") => ContentType::Json,
@@ -213,14 +203,15 @@ pub fn from_string(
         match (content_type.type_(), content_type.subtype()) {
             (_, mime::JSON) => {
                 let mut c: MediaContainerWrapper<MediaContainer> =
-                    serde_json::from_str(&string).unwrap();
+                    serde_json::from_str(&string).map_err(Error::other)?;
                 c.content_type = ContentType::Json;
                 c
             }
             _ => MediaContainerWrapper {
                 // default to xml
                 // media_container: from_xml_str(&body_string).unwrap(),
-                media_container: yaserde::de::from_str(&string).unwrap(),
+                media_container: yaserde::de::from_str(&string)
+                    .map_err(|e| Error::other(anyhow::anyhow!(e)))?,
                 content_type: ContentType::Xml,
             },
             // _ => "attachment",
@@ -231,7 +222,7 @@ pub fn from_string(
 pub async fn from_reqwest_response(
     res: reqwest::Response,
 ) -> Result<MediaContainerWrapper<MediaContainer>, Error> {
-    let bytes = res.bytes().await.unwrap();
+    let bytes = res.bytes().await.map_err(Error::other)?;
     //dbg!(&bytes);
     from_bytes(bytes)
 }
@@ -239,7 +230,7 @@ pub async fn from_reqwest_response(
 pub async fn from_reqwest_response_mut(
     mut res: reqwest::Response,
 ) -> Result<MediaContainerWrapper<MediaContainer>, Error> {
-    let bytes = res.bytes().await.unwrap();
+    let bytes = res.bytes().await.map_err(Error::other)?;
     from_bytes(bytes)
 }
 

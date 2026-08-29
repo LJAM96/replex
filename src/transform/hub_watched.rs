@@ -1,5 +1,5 @@
 use super::Transform;
-use crate::{config::Config, models::*, plex_client::PlexClient};
+use crate::{models::*, plex_client::PlexClient};
 use async_trait::async_trait;
 
 #[derive(Default, Debug)]
@@ -11,10 +11,8 @@ impl Transform for HubWatchedTransform {
         &self,
         item: &mut MetaData,
         plex_client: PlexClient,
-        options: PlexContext,
+        _options: PlexContext,
     ) {
-        let config: Config = Config::figment().extract().unwrap();
-
         if item.is_hub() {
             let exclude_watched = item
                 .exclude_watched(plex_client.clone())

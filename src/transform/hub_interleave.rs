@@ -1,4 +1,4 @@
-use crate::{config::Config, models::*, plex_client::PlexClient, utils::*};
+use crate::{models::*, plex_client::PlexClient, utils::*};
 
 use super::Transform;
 use async_trait::async_trait;
@@ -15,7 +15,7 @@ impl Transform for HubInterleaveTransform {
         plex_client: PlexClient,
         options: PlexContext,
     ) -> MediaContainer {
-        let config: Config = Config::figment().extract().unwrap();
+        let config = &plex_client.config;
         let mut new_hubs: Vec<MetaData> = vec![];
 
         if !config.interleave {
@@ -23,7 +23,7 @@ impl Transform for HubInterleaveTransform {
         }
 
         for hub in item.children_mut() {
-            if hub.size.unwrap() == 0 {
+            if hub.size.unwrap_or_default() == 0 {
                 continue;
             }
 
@@ -44,9 +44,17 @@ impl Transform for HubInterleaveTransform {
             // }
             match p {
                 Some(v) => {
+                    let Some(left_key) = new_hubs[v].key.clone() else {
+                        new_hubs.push(hub.to_owned());
+                        continue;
+                    };
+                    let Some(right_key) = hub.key.clone() else {
+                        new_hubs.push(hub.to_owned());
+                        continue;
+                    };
                     new_hubs[v].key = Some(merge_children_keys(
-                        new_hubs[v].key.clone().unwrap(),
-                        hub.key.clone().unwrap(),
+                        left_key,
+                        right_key,
                     ));
                     let c = new_hubs[v].children();
                     new_hubs[v].set_children(

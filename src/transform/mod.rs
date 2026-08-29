@@ -57,15 +57,7 @@ pub trait Transform: Send + Sync + 'static {
     }
     async fn filter_metadata(
         &self,
-        item: MetaData,
-        plex_client: PlexClient,
-        options: PlexContext,
-    ) -> bool {
-        true
-    }
-    async fn filter_mediacontainer(
-        &self,
-        item: MediaContainer,
+        item: &MetaData,
         plex_client: PlexClient,
         options: PlexContext,
     ) -> bool {
@@ -152,47 +144,32 @@ impl TransformBuilder {
         self,
         container: &mut MediaContainerWrapper<MediaContainer>,
     ) {
-        //let mut childs = container.media_container.children_mut();
-        let mut idx = 0 as usize;
-        let mut filter_childs = vec![];
         for t in self.transforms.clone() {
-            //dbg!(&filter_childs);
-            for child in container.media_container.children_mut() {
-                //if filter_childs.contains(child.key.clone().unwrap()) {
-                //  continue;
-                //}
-                //dbg!(&child.rating_key);
-                //dbg!(&child.key);
-                if !t
+            // Filter by index rather than optional Plex keys. Some legitimate
+            // metadata nodes do not carry `key`; key-based removal both cloned
+            // every item and could panic on those responses.
+            let mut index = 0usize;
+            while index < container.media_container.children_mut().len() {
+                let keep = t
                     .filter_metadata(
-                        child.clone(),
+                        &container.media_container.children_mut()[index],
                         self.plex_client.clone(),
                         self.options.clone(),
                     )
-                    .await
-                {
-                    //childs.remove(idx);
-                    filter_childs.push(child.key.clone().unwrap());
+                    .await;
+                if !keep {
+                    container.media_container.children_mut().remove(index);
                     continue;
                 }
                 t.transform_metadata(
-                    child,
+                    &mut container.media_container.children_mut()[index],
                     self.plex_client.clone(),
                     self.options.clone(),
                 )
                 .await;
-                //if
-                //idx = idx + 1;
+                index += 1;
             }
-            container.media_container.children_mut().retain(|x| {
-                !x.key.is_some()
-                    || !filter_childs.contains(&x.key.clone().unwrap())
-            });
-            //item.children_mut().retain(|x| !x.is_watched());
-            //future::join_all(futures).await;
 
-            // dont use join as it needs ti be executed in order
-            // let l = std::cell::RefCell::new(&mut container.media_container);
             container.media_container = t
                 .transform_mediacontainer(
                     container.media_container.clone(),
@@ -200,19 +177,12 @@ impl TransformBuilder {
                     self.options.clone(),
                 )
                 .await;
-            // dbg!(container.media_container.size);
         }
-
-        //container.media_container.set_children(childs);
 
         if container.media_container.size.is_some() {
             container.media_container.size = Some(
-                container
-                    .media_container
-                    .children_mut()
-                    .len()
-                    .try_into()
-                    .unwrap(),
+                i64::try_from(container.media_container.children_mut().len())
+                    .unwrap_or(i64::MAX),
             );
         }
     }

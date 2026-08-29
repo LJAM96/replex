@@ -1,5 +1,5 @@
 use super::Transform;
-use crate::{config::Config, models::*, plex_client::PlexClient};
+use crate::{models::*, plex_client::PlexClient};
 use async_trait::async_trait;
 use itertools::Itertools;
 
@@ -16,9 +16,9 @@ impl Transform for LibraryInterleaveTransform {
         &self,
         mut item: MediaContainer,
         plex_client: PlexClient,
-        options: PlexContext,
+        _options: PlexContext,
     ) -> MediaContainer {
-        let config: Config = Config::figment().extract().unwrap();
+        let config = &plex_client.config;
         if !config.interleave {
             return item;
         }
@@ -26,21 +26,27 @@ impl Transform for LibraryInterleaveTransform {
         let mut total_size = 0;
 
         for id in self.collection_ids.clone() {
-            let collection = plex_client
+            let collection = match plex_client
                 .clone()
                 .get_cached(
                     plex_client.get_collection(id as i32),
-                    format!("collection:{}", id.to_string()),
+                    format!("collection:{id}"),
                 )
                 .await
-                .unwrap();
+            {
+                Ok(collection) => collection,
+                Err(error) => {
+                    tracing::warn!(collection_id = id, error = %error, "Skipping inaccessible collection during library interleave");
+                    continue;
+                }
+            };
 
             //match c {
             //    Ok(v) =>,
             //    Err(err) =>
             //}
 
-            let mut c = plex_client
+            let mut c = match plex_client
                 .clone()
                 .get_cached(
                     plex_client.get_collection_children(
@@ -54,7 +60,13 @@ impl Transform for LibraryInterleaveTransform {
                     ),
                 )
                 .await
-                .unwrap();
+            {
+                Ok(children) => children,
+                Err(error) => {
+                    tracing::warn!(collection_id = id, error = %error, "Skipping collection children during library interleave");
+                    continue;
+                }
+            };
 
             // should have proper errors but lets assume not found so no access
             //match c {
@@ -62,7 +74,15 @@ impl Transform for LibraryInterleaveTransform {
             //    Err(err) =>
             //}
 
-            if collection.media_container.exclude_watched() {
+            let collection_excludes_watched = config.exclude_watched
+                || collection
+                    .media_container
+                    .metadata
+                    .first()
+                    .is_some_and(|metadata| {
+                        metadata.has_label("REPLEX_EXCLUDE_WATCHED".to_string())
+                    });
+            if collection_excludes_watched {
                 c.media_container.children_mut().retain(|x| !x.is_watched());
             }
 

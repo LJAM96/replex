@@ -1,6 +1,4 @@
-use crate::{
-    config::Config, models::*, plex_client::PlexClient, resolution_policy::*,
-};
+use crate::{models::*, plex_client::PlexClient, resolution_policy::*};
 use async_trait::async_trait;
 
 use super::Transform;
@@ -10,27 +8,25 @@ use super::Transform;
 ///
 /// - Items whose media all exceed the limit are hidden entirely.
 /// - Filtering recurses into nested metadata (hub contents, directories).
-/// - When identity verification fails: fail-closed hides every item that
+/// - When identity resolution fails: fail-closed hides every item that
 ///   carries media; fail-open leaves the response untouched.
 /// - Unrestricted users pass through unchanged.
 pub struct ResolutionPolicyTransform;
 
 impl ResolutionPolicyTransform {
-    /// Resolve the effective policy for this request, together with the
-    /// verified identity it was resolved for (needed to scope part policy
-    /// cache entries per account).
+    /// Resolve the effective policy for this request together with the
+    /// resolved identity used to select that policy.
     ///
     /// Identity lookups hit the per-token cache, so repeated calls across
     /// items in one response cost effectively nothing after the first.
     async fn current_policy(
         plex_client: &PlexClient,
     ) -> Result<(ResolutionPolicy, UserIdentity), ()> {
-        let config: Config = Config::figment().extract().unwrap();
+        let config = &plex_client.config;
         if !config.resolution_policy_enabled {
             return Ok((
                 ResolutionPolicy::unrestricted(),
-                // Unused: the unrestricted policy short-circuits every caller
-                // before the part policy cache is consulted.
+                // Unused when the policy feature is disabled.
                 UserIdentity {
                     id: 0,
                     uuid: String::new(),
@@ -39,12 +35,23 @@ impl ResolutionPolicyTransform {
             ));
         }
 
-        let identity = plex_client.get_current_user().await.map_err(|e| {
-            tracing::warn!(
-                error = %e,
-                "Identity resolution failed for resolution policy"
-            );
-        })?;
+        if let Some(security) = &plex_client.security_context {
+            return Ok((security.policy.clone(), security.identity.clone()));
+        }
+        if plex_client.security_unavailable_fail_closed.is_some() {
+            return Err(());
+        }
+
+        let identity = plex_client
+            .get_current_identity()
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    error = %e,
+                    "Identity resolution failed for resolution policy"
+                );
+            })?
+            .identity;
 
         let policy = resolve_policy(
             &config.user_resolution_policies,
@@ -69,30 +76,25 @@ impl Transform for ResolutionPolicyTransform {
             Ok((policy, identity)) => (policy, identity),
             Err(_) => {
                 // Fail closed: strip every version so nothing playable leaks.
-                let config: Config = Config::figment().extract().unwrap();
-                if config.resolution_policy_fail_closed {
+                if plex_client.config.resolution_policy_fail_closed {
                     clear_media_recursive(item);
                 }
                 return;
             }
         };
 
+        // Record immutable part classification facts before any media is
+        // stripped. These facts are safe to share across accounts because no
+        // authorisation decision is cached; each direct-part request applies
+        // its current account policy to the classification at request time.
+        plex_client.cache_part_classification(&item.media).await;
+
         if policy.is_unrestricted() {
             return;
         }
 
-        // Record part permissions before stripping so direct /library/parts
-        // requests can be validated even for items never played. Scoped to
-        // this account and its current policy; never shared across users.
-        crate::plex_client::cache_part_policy(
-            &item.media,
-            &policy,
-            &identity.uuid,
-        )
-        .await;
-
         let before = count_media(item);
-        strip_media_recursive(item, &policy);
+        filter_media_recursive(item, &policy);
         let after = count_media(item);
 
         if before != after {
@@ -108,7 +110,7 @@ impl Transform for ResolutionPolicyTransform {
 
     async fn filter_metadata(
         &self,
-        item: MetaData,
+        item: &MetaData,
         plex_client: PlexClient,
         _options: PlexContext,
     ) -> bool {
@@ -116,8 +118,7 @@ impl Transform for ResolutionPolicyTransform {
         {
             Ok((policy, identity)) => (policy, identity),
             Err(_) => {
-                let config: Config = Config::figment().extract().unwrap();
-                if config.resolution_policy_fail_closed
+                if plex_client.config.resolution_policy_fail_closed
                     && !item.media.is_empty()
                 {
                     tracing::warn!(
@@ -153,39 +154,37 @@ impl Transform for ResolutionPolicyTransform {
 
         true
     }
-
-    async fn filter_mediacontainer(
-        &self,
-        item: MediaContainer,
-        plex_client: PlexClient,
-        _options: PlexContext,
-    ) -> bool {
-        // Hubs wrap their items in nested metadata; a hub whose entire
-        // content is blocked should disappear too.
-        let (policy, _identity) = match Self::current_policy(&plex_client).await
-        {
-            Ok((policy, identity)) => (policy, identity),
-            Err(_) => return true, // item-level fail-closed already handled
-        };
-        let _ = item;
-        let _ = &policy;
-        true
-    }
 }
 
-/// Remove prohibited versions from an item and all nested metadata.
-fn strip_media_recursive(item: &mut MetaData, policy: &ResolutionPolicy) {
+/// Remove prohibited versions and prune nested playable items that no longer
+/// have a permitted version. Structural nodes are retained while they still
+/// contain surviving descendants.
+fn filter_media_recursive(item: &mut MetaData, policy: &ResolutionPolicy) {
+    let had_media = !item.media.is_empty();
     item.media.retain(|m| media_allowed(m, policy));
 
-    for child in item.metadata.iter_mut() {
-        strip_media_recursive(child, policy);
+    prune_children(&mut item.metadata, policy);
+    prune_children(&mut item.directory, policy);
+    prune_children(&mut item.video, policy);
+
+    let _ = had_media;
+}
+
+fn prune_children(children: &mut Vec<MetaData>, policy: &ResolutionPolicy) {
+    for child in children.iter_mut() {
+        filter_media_recursive(child, policy);
     }
-    for child in item.directory.iter_mut() {
-        strip_media_recursive(child, policy);
-    }
-    for child in item.video.iter_mut() {
-        strip_media_recursive(child, policy);
-    }
+    children.retain(|child| {
+        let structural = child.media.is_empty()
+            && (!child.metadata.is_empty()
+                || !child.directory.is_empty()
+                || !child.video.is_empty());
+        let originally_playable = matches!(
+            child.r#type.as_str(),
+            "movie" | "episode" | "clip" | "track"
+        );
+        !originally_playable || !child.media.is_empty() || structural
+    });
 }
 
 /// Fail-closed helper: drop every version regardless of classification.
@@ -249,13 +248,13 @@ impl Transform for CollectionVisibilityTransform {
 
     async fn filter_metadata(
         &self,
-        item: MetaData,
+        item: &MetaData,
         plex_client: PlexClient,
         _options: PlexContext,
     ) -> bool {
         match ResolutionPolicyTransform::current_policy(&plex_client).await {
             Ok((policy, _identity)) => {
-                if Self::is_hidden(&item, &policy) {
+                if Self::is_hidden(item, &policy) {
                     tracing::debug!(
                         title = %item.title,
                         "Hiding collection for this account"
@@ -330,7 +329,7 @@ mod tests {
 
         let keep = movie(3, &[("1080", 3)]);
         let visible = ResolutionPolicyTransform
-            .filter_metadata(keep, client, PlexContext::default())
+            .filter_metadata(&keep, client, PlexContext::default())
             .await;
         assert!(!visible, "items with media hidden while failing closed");
     }
@@ -341,16 +340,10 @@ mod tests {
             token: Some("test-token".to_string()),
             ..Default::default()
         };
-        PlexClient {
-            http_client: reqwest_middleware::ClientBuilder::new(
-                reqwest::Client::new(),
-            )
-            .build(),
-            context,
-            host: "http://localhost:32400".to_string(),
-            cache: moka::future::Cache::builder().max_capacity(10).build(),
-            default_headers: http::HeaderMap::new(),
-        }
+        let config: crate::config::Config =
+            crate::config::Config::figment().extract().unwrap();
+        let state = crate::state::AppState::new(config).unwrap();
+        PlexClient::from_context_with_state(&context, &state).unwrap()
     }
 
     // pure recursion logic tested without the network
@@ -370,13 +363,11 @@ mod tests {
         let mut parent: MetaData = serde_json::from_str(json).unwrap();
 
         assert_eq!(count_media(&parent), 3);
-        strip_media_recursive(&mut parent, &policy);
+        filter_media_recursive(&mut parent, &policy);
 
-        assert_eq!(parent.metadata.len(), 2);
+        assert_eq!(parent.metadata.len(), 1);
         assert_eq!(parent.metadata[0].media.len(), 1);
         assert_eq!(parent.metadata[0].media[0].id, 12);
-        // 4K-only episode survives structurally; hiding is filter_metadata's job
-        assert_eq!(parent.metadata[1].media.len(), 0);
         assert_eq!(count_media(&parent), 1);
     }
 

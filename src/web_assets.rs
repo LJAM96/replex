@@ -7,12 +7,11 @@
 //! marking them immutable removes both costs after the first load.
 
 use crate::cache::{Expiration, GLOBAL_CACHE};
-use crate::config::Config;
+use crate::state;
 use salvo::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use salvo::http::{HeaderValue, ResBody, StatusCode};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 const ASSET_CACHE_PREFIX: &str = "webasset:";
 
@@ -38,15 +37,15 @@ fn cache_policy_for(path: &str) -> &'static str {
 }
 
 /// Fetch an asset from upstream once and stash the raw bytes.
-async fn fetch_upstream(path: &str) -> Result<CachedAsset, StatusCode> {
-    let config: Config = Config::figment().extract().unwrap();
-    let host = config.host.unwrap_or_default();
+async fn fetch_upstream(
+    path: &str,
+    state: &crate::state::AppState,
+) -> Result<CachedAsset, StatusCode> {
+    let host = state.config.host.clone().unwrap_or_default();
     let url = format!("{}{}", host.trim_end_matches('/'), path);
 
-    let resp = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .unwrap()
+    let resp = state
+        .asset_http
         .get(&url)
         .send()
         .await
@@ -72,8 +71,20 @@ async fn fetch_upstream(path: &str) -> Result<CachedAsset, StatusCode> {
 
 /// Serve `/web/<**rest>` from the in-memory asset cache.
 #[handler]
-pub async fn serve_web_asset(req: &mut Request, res: &mut Response) {
+pub async fn serve_web_asset(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) {
     let path = req.uri().path().to_string();
+    let state = match state::from_depot(depot) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::error!(error = %error, "web asset request missing shared state");
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            return;
+        }
+    };
 
     let asset = match GLOBAL_CACHE
         .get::<CachedAsset>(&format!("{}{}", ASSET_CACHE_PREFIX, path))
@@ -81,7 +92,7 @@ pub async fn serve_web_asset(req: &mut Request, res: &mut Response) {
     {
         Some(asset) => asset,
         None => {
-            let fetched = match fetch_upstream(&path).await {
+            let fetched = match fetch_upstream(&path, &state).await {
                 Ok(a) => a,
                 Err(status) => {
                     res.status_code(status);

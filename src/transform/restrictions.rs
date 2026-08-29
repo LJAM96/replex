@@ -1,4 +1,4 @@
-use crate::{config::Config, models::*, plex_client::PlexClient};
+use crate::{models::*, plex_client::PlexClient};
 use async_trait::async_trait;
 
 use super::Transform;
@@ -9,11 +9,11 @@ pub struct HubRestrictionTransform;
 impl Transform for HubRestrictionTransform {
     async fn filter_metadata(
         &self,
-        item: MetaData,
+        item: &MetaData,
         plex_client: PlexClient,
-        options: PlexContext,
+        _options: PlexContext,
     ) -> bool {
-        let config: Config = Config::figment().extract().unwrap();
+        let config = &plex_client.config;
 
         if !config.hub_restrictions {
             return true;
@@ -27,47 +27,57 @@ impl Transform for HubRestrictionTransform {
             return true;
         }
 
-        if item.size.unwrap() == 0 {
+        if item.size.unwrap_or_default() == 0 {
             return false;
         }
 
-        let section_id: i64 = item.library_section_id.unwrap_or_else(|| {
-            item.hub_identifier
-                .clone()
-                .unwrap()
-                .split('.')
-                .collect::<Vec<&str>>()[2]
-                .parse()
-                .unwrap()
-        });
+        let section_id = match item.library_section_id.or_else(|| {
+            item.hub_identifier.as_deref().and_then(|identifier| {
+                identifier.split('.').nth(2)?.parse::<i64>().ok()
+            })
+        }) {
+            Some(id) => id,
+            None => {
+                tracing::warn!(
+                    hub_identifier = ?item.hub_identifier,
+                    "Ignoring malformed collection hub without a section id"
+                );
+                return true;
+            }
+        };
 
         //let start = Instant::now();
-        let mut custom_collections = plex_client
+        let mut custom_collections = match plex_client
             .clone()
             .get_cached(
                 plex_client.get_section_collections(section_id),
-                format!("sectioncollections:{}", section_id).to_string(),
+                format!("sectioncollections:{}", section_id),
             )
             .await
-            .unwrap();
+        {
+            Ok(collections) => collections,
+            Err(error) => {
+                tracing::warn!(error = %error, section_id, "Could not load custom collections for hub restriction");
+                return true;
+            }
+        };
 
         //println!("Elapsed time: {:.2?}", start.elapsed());
         let custom_collections_ids: Vec<String> = custom_collections
             .media_container
             .children()
             .iter()
-            .map(|c| c.rating_key.clone().unwrap())
+            .filter_map(|c| c.rating_key.clone())
             .collect();
 
-        custom_collections_ids.contains(
-            &item
-                .hub_identifier
-                .clone()
-                .unwrap()
-                .split('.')
-                .last()
-                .unwrap()
-                .to_owned(),
-        )
+        item.hub_identifier
+            .as_deref()
+            .and_then(|identifier| identifier.split('.').last())
+            .map(|id| {
+                custom_collections_ids
+                    .iter()
+                    .any(|candidate| candidate == id)
+            })
+            .unwrap_or(true)
     }
 }

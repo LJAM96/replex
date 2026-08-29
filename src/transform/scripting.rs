@@ -22,7 +22,7 @@ impl Transform for MediaContainerScriptingTransform {
         plex_client: PlexClient,
         options: PlexContext,
     ) -> MediaContainer {
-        let config: Config = Config::figment().extract().unwrap();
+        let config = &plex_client.config;
         if config.test_script.is_none() {
             return item;
         }

@@ -1,6 +1,12 @@
 use httpmock::prelude::*;
+use replex::config::Config;
 use replex::models::PlexContext;
 use replex::plex_client::{IdentityError, PlexClient};
+use sha2::{Digest, Sha256};
+
+fn token_fingerprint(token: &str) -> String {
+    data_encoding::HEXLOWER.encode(&Sha256::digest(token.as_bytes()))
+}
 
 fn client_for(token: Option<&str>) -> PlexClient {
     let mut context = PlexContext::default();
@@ -33,6 +39,14 @@ async fn identity_resolution_scenarios() {
     // IDENTITY_CACHE and other globals extract the full Config on first use,
     // which requires these to be present.
     std::env::set_var("REPLEX_HOST", "http://localhost:32400");
+    for var in [
+        "REPLEX_TOKEN",
+        "REPLEX_TOKEN_IDENTITY_MAP",
+        "REPLEX_CLIENT_IDENTITY_MAP",
+        "REPLEX_ALLOW_USERNAME_FALLBACK",
+    ] {
+        std::env::remove_var(var);
+    }
 
     let mock = MockServer::start();
     std::env::set_var("REPLEX_IDENTITY_API_BASE", mock.base_url());
@@ -236,4 +250,171 @@ async fn identity_resolution_scenarios() {
     // Second lookup must be served from the identity cache.
     let cached = client.get_current_user().await.unwrap();
     assert_eq!(cached, identity);
+
+    // --- opaque token resolves through an administrator configured SHA256
+    // fingerprint binding after every Plex-backed identity method fails ---
+    let opaque_token = "opaque-fingerprint-token";
+    let opaque_fingerprint = token_fingerprint(opaque_token);
+    let verified_override_token = "verified-overrides-fingerprint";
+    let verified_override_fingerprint =
+        token_fingerprint(verified_override_token);
+    std::env::set_var(
+        "REPLEX_TOKEN_IDENTITY_MAP",
+        format!(
+            r#"{{"{opaque_fingerprint}":"fingerprint-user","{verified_override_fingerprint}":"must-not-win"}}"#
+        ),
+    );
+
+    mock.mock(|when, then| {
+        when.method(GET)
+            .path("/api/v2/user")
+            .header("X-Plex-Token", opaque_token);
+        then.status(401);
+    });
+
+    let client = client_for_host(Some(opaque_token), &mock.base_url());
+    let identity = client.get_current_user().await.unwrap();
+    assert_eq!(identity.username, "fingerprint-user");
+    assert_eq!(identity.uuid, format!("token-sha256-{opaque_fingerprint}"));
+
+    // The client identifier is not the credential. Another opaque token
+    // presenting the exact same client identifier cannot inherit the first
+    // token's administrator binding.
+    let unrelated_token = "opaque-same-client-different-token";
+    mock.mock(|when, then| {
+        when.method(GET)
+            .path("/api/v2/user")
+            .header("X-Plex-Token", unrelated_token);
+        then.status(401);
+    });
+    let client = client_for_host(Some(unrelated_token), &mock.base_url());
+    match client.get_current_user().await {
+        Err(IdentityError::InvalidToken) => {}
+        other => panic!(
+            "same client identifier must not inherit another token binding, got {:?}",
+            other.map(|i| i.username)
+        ),
+    }
+
+    // A real Plex identity always wins over an administrator fallback entry
+    // for the same token fingerprint.
+    let verified_override = mock.mock(|when, then| {
+        when.method(GET)
+            .path("/api/v2/user")
+            .header("X-Plex-Token", verified_override_token);
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"id":77,"uuid":"verified-uuid","username":"verified-user"}"#);
+    });
+    let client =
+        client_for_host(Some(verified_override_token), &mock.base_url());
+    let identity = client.get_current_user().await.unwrap();
+    assert_eq!(identity.username, "verified-user");
+    assert_eq!(identity.uuid, "verified-uuid");
+    assert_eq!(verified_override.hits(), 1);
+
+    // Detailed token bindings may add a client identifier constraint. A
+    // mismatch is terminal and cannot fall through to weaker identity modes.
+    let constrained_token = "opaque-constrained-token";
+    let constrained_fingerprint = token_fingerprint(constrained_token);
+    std::env::set_var(
+        "REPLEX_TOKEN_IDENTITY_MAP",
+        format!(
+            r#"{{"{opaque_fingerprint}":"fingerprint-user","{constrained_fingerprint}":{{"username":"constrained-user","client_identifier":"bound-client"}}}}"#
+        ),
+    );
+    mock.mock(|when, then| {
+        when.method(GET)
+            .path("/api/v2/user")
+            .header("X-Plex-Token", constrained_token);
+        then.status(401);
+    });
+
+    let client = client_for_host(Some(constrained_token), &mock.base_url());
+    match client.get_current_user().await {
+        Err(IdentityError::InvalidToken) => {}
+        other => panic!(
+            "client constraint mismatch must reject the binding, got {:?}",
+            other.map(|i| i.username)
+        ),
+    }
+
+    let mut client = client_for_host(Some(constrained_token), &mock.base_url());
+    client.context.client_identifier = Some("bound-client".to_string());
+    let identity = client.get_current_user().await.unwrap();
+    assert_eq!(identity.username, "constrained-user");
+
+    // Username-header identity remains disabled unless explicitly enabled.
+    // This proves a spoofed username cannot become an identity by default.
+    std::env::remove_var("REPLEX_TOKEN_IDENTITY_MAP");
+    let username_disabled_token = "username-fallback-disabled";
+    mock.mock(|when, then| {
+        when.method(GET)
+            .path("/api/v2/user")
+            .header("X-Plex-Token", username_disabled_token);
+        then.status(401);
+    });
+    let mut client =
+        client_for_host(Some(username_disabled_token), &mock.base_url());
+    client.context.username = Some("spoofed-user".to_string());
+    match client.get_current_user().await {
+        Err(IdentityError::InvalidToken) => {}
+        other => panic!(
+            "username fallback must be disabled by default, got {:?}",
+            other.map(|i| i.username)
+        ),
+    }
+
+    let username_enabled_token = "username-fallback-enabled";
+    mock.mock(|when, then| {
+        when.method(GET)
+            .path("/api/v2/user")
+            .header("X-Plex-Token", username_enabled_token);
+        then.status(401);
+    });
+    std::env::set_var("REPLEX_ALLOW_USERNAME_FALLBACK", "true");
+    let mut client =
+        client_for_host(Some(username_enabled_token), &mock.base_url());
+    client.context.username = Some("explicit-username-user".to_string());
+    let identity = client.get_current_user().await.unwrap();
+    assert_eq!(identity.username, "explicit-username-user");
+    std::env::remove_var("REPLEX_ALLOW_USERNAME_FALLBACK");
+
+    // The old clientIdentifier mapping remains available for migration, but
+    // only when an administrator explicitly configures the legacy map.
+    let legacy_token = "legacy-client-map-token";
+    mock.mock(|when, then| {
+        when.method(GET)
+            .path("/api/v2/user")
+            .header("X-Plex-Token", legacy_token);
+        then.status(401);
+    });
+    std::env::set_var(
+        "REPLEX_CLIENT_IDENTITY_MAP",
+        r#"{"replex-test":"legacy-user"}"#,
+    );
+    let client = client_for_host(Some(legacy_token), &mock.base_url());
+    let identity = client.get_current_user().await.unwrap();
+    assert_eq!(identity.username, "legacy-user");
+
+    // Fingerprints are configuration credentials and must be unambiguous.
+    // Reject malformed keys rather than silently accepting a mapping that can
+    // never match a real SHA256 token fingerprint.
+    std::env::set_var(
+        "REPLEX_TOKEN_IDENTITY_MAP",
+        r#"{"not-a-sha256":"invalid-user"}"#,
+    );
+    assert!(
+        Config::figment().extract::<Config>().is_err(),
+        "malformed token identity fingerprints must fail configuration parsing"
+    );
+
+    for var in [
+        "REPLEX_TOKEN",
+        "REPLEX_TOKEN_IDENTITY_MAP",
+        "REPLEX_CLIENT_IDENTITY_MAP",
+        "REPLEX_ALLOW_USERNAME_FALLBACK",
+    ] {
+        std::env::remove_var(var);
+    }
 }

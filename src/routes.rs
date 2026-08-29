@@ -1,3 +1,7 @@
+use crate::auth::{
+    request_context, security_state, RequestContextMiddleware,
+    SecurityContextMiddleware, SecurityContextState,
+};
 use crate::config::Config;
 use crate::logging::*;
 use crate::models::*;
@@ -5,6 +9,7 @@ use crate::plex_client::*;
 use crate::resolution_policy::{
     allowed_media, best_allowed_media, media_allowed, resolve_policy,
 };
+use crate::state::{self, AppState, AppStateMiddleware};
 use crate::timeout::*;
 use crate::transform::*;
 use crate::url::*;
@@ -26,8 +31,49 @@ use salvo::routing::PathFilter;
 // disk cache; the salvo "test" feature is unconditionally enabled in
 // Cargo.toml (utils::from_salvo_response relies on the same helper).
 use salvo::test::ResponseExt;
+use std::sync::Arc;
 use tokio::time::Duration;
 use url::Url;
+
+const SKIP_OPTIONAL_TRANSFORMS_KEY: &str = "replex.skip_optional_transforms";
+
+fn skip_optional_transforms(depot: &Depot) -> bool {
+    depot
+        .get::<bool>(SKIP_OPTIONAL_TRANSFORMS_KEY)
+        .copied()
+        .unwrap_or(false)
+}
+
+fn plex_client_from_depot(
+    context: &PlexContext,
+    depot: &Depot,
+) -> anyhow::Result<PlexClient> {
+    let state = state::from_depot(depot)?;
+    let request = request_context(depot).ok();
+    let effective_context = request
+        .as_ref()
+        .map(|request| &request.plex)
+        .unwrap_or(context);
+    let mut client =
+        PlexClient::from_context_with_state(effective_context, &state)?;
+    if let Some(request) = request {
+        client.host = request.upstream_host.clone();
+    }
+    match security_state(depot) {
+        Some(SecurityContextState::Resolved(security)) => {
+            client.security_context = Some(security);
+        }
+        Some(SecurityContextState::Unavailable { fail_closed, .. }) => {
+            client.security_unavailable_fail_closed = Some(fail_closed);
+        }
+        None => {}
+    }
+    Ok(client)
+}
+
+fn app_config(depot: &Depot) -> anyhow::Result<Arc<Config>> {
+    Ok(state::from_depot(depot)?.config.clone())
+}
 
 /// Default dynamic responses to `Cache-Control: no-cache`.
 ///
@@ -53,7 +99,17 @@ async fn api_cache_control(
 }
 
 pub fn route() -> Router {
-    let config: Config = Config::figment().extract().unwrap();
+    let config: Config = Config::figment()
+        .extract()
+        .expect("invalid Replex configuration");
+    let state = Arc::new(
+        AppState::new(config).expect("invalid Replex application state"),
+    );
+    route_with_state(state)
+}
+
+pub fn route_with_state(state: Arc<AppState>) -> Router {
+    let config = &state.config;
 
     // cant use colon in paths. So we do it with an regex
     let guid = regex::Regex::new(":").unwrap();
@@ -113,7 +169,10 @@ pub fn route() -> Router {
             .allow_credentials(true)
             .into_handler()
     };
-    let mut router = Router::with_hoop(cors)
+    let mut router = Router::with_hoop(AppStateMiddleware::new(state.clone()))
+        .hoop(RequestContextMiddleware)
+        .hoop(SecurityContextMiddleware)
+        .hoop(cors)
         .hoop(Logger::new())
         .hoop(api_cache_control)
         .hoop(should_skip)
@@ -335,9 +394,8 @@ pub fn route() -> Router {
 ///
 /// Every /photo/:/transcode hit is a fresh PMS transcode (~0.4-0.7s each);
 /// a home wall of posters therefore costs tens of seconds of serialized
-/// upstream work on first view. Posters are stable per item+size, so cache
-/// them (per unique query minus the client token) and let every user share
-/// the warm entries.
+/// upstream work on first view. Plex artwork is authenticated library data,
+/// so entries are canonicalised by image request and scoped by token hash.
 pub(crate) static PHOTO_CACHE: Lazy<moka::future::Cache<String, CachedImage>> =
     Lazy::new(|| {
         moka::future::Cache::builder()
@@ -359,13 +417,44 @@ fn photo_cache_key(req: &Request) -> String {
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_default();
-    canonical_photo_key(&raw)
+    photo_cache_key_for(&raw, photo_request_token(req).as_deref())
 }
 
-/// Canonical key for a photo request path+query. Strips the per-user
+/// Photo transcode requests normally carry authentication in the standard
+/// header or top-level query, but some Plex clients place it only inside the
+/// nested `url=` value. Resolve all supported placements before selecting the
+/// artwork cache namespace so a nested-token request can never fall into the
+/// shared anonymous scope.
+fn photo_request_token(req: &Request) -> Option<String> {
+    request_token(req).or_else(|| {
+        req.queries()
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("url"))
+            .and_then(|(_, value)| extract_inner_token(value))
+    })
+}
+
+fn extract_inner_token(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    let marker = "x-plex-token=";
+    let start = lower.find(marker)? + marker.len();
+    let remainder = &value[start..];
+    let end = remainder
+        .find(|c| c == '&' || c == '#')
+        .unwrap_or(remainder.len());
+    let token = &remainder[..end];
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+/// Canonical image identity for a photo request path+query. Strips the per-user
 /// token from BOTH the top-level query and inside the nested `url=`
-/// parameter (Plex Web appends its own token there), so every account
-/// shares one cache entry per unique image.
+/// parameter (Plex Web appends its own token there). Account identity is added
+/// separately by `photo_cache_key_for`, so token placement cannot fragment the
+/// cache while two accounts can never share an authenticated artwork entry.
 pub(crate) fn canonical_photo_key(raw: &str) -> String {
     match Url::parse(&format!("http://x{}", raw)) {
         Ok(mut url) => {
@@ -395,23 +484,22 @@ pub(crate) fn canonical_photo_key(raw: &str) -> String {
 }
 
 fn strip_inner_token(v: &str) -> String {
-    match v.find_once_token() {
-        Some(idx) => v[..idx].trim_end_matches('?').to_string(),
-        None => v.to_string(),
-    }
-}
-
-trait FindOnceToken {
-    fn find_once_token(&self) -> Option<usize>;
-}
-impl FindOnceToken for str {
-    fn find_once_token(&self) -> Option<usize> {
-        let lower = self.to_ascii_lowercase();
-        ["x-plex-token=", "&x-plex-token="]
-            .iter()
-            .filter_map(|needle| lower.find(needle).map(|i| (i, needle.len())))
-            .min_by(|a, b| a.0.cmp(&b.0))
-            .map(|(i, _)| i)
+    let Some((base, query)) = v.split_once('?') else {
+        return v.to_string();
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| {
+            !pair
+                .split_once('=')
+                .map(|(key, _)| key.eq_ignore_ascii_case("x-plex-token"))
+                .unwrap_or(false)
+        })
+        .collect();
+    if kept.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", kept.join("&"))
     }
 }
 
@@ -607,7 +695,7 @@ async fn library_cache_lookup(
         );
         *res.body_mut() =
             salvo::http::body::ResBody::Once(bytes::Bytes::from(data));
-        match apply_policy_transforms(req, res).await {
+        match apply_policy_transforms(req, depot, res).await {
             Ok(()) => {
                 ctrl.skip_rest();
                 return Ok(());
@@ -680,6 +768,12 @@ async fn photo_cache_hoop(
     res: &mut Response,
     ctrl: &mut FlowCtrl,
 ) -> Result<(), anyhow::Error> {
+    if skip_optional_transforms(depot) {
+        do_proxy_request(req, res, depot, ctrl).await;
+        ctrl.skip_rest();
+        return Ok(());
+    }
+
     let key = photo_cache_key(req);
     if let Some(record) = crate::disk_cache::get_full(&key).await {
         // A persisted photo keeps its original content type (WebP, PNG, ...).
@@ -782,7 +876,16 @@ async fn do_proxy_request(
     depot: &mut Depot,
     ctrl: &mut FlowCtrl,
 ) {
-    let proxy = default_proxy();
+    let state = match state::from_depot(depot) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::error!(error = %error, "proxy request missing shared state");
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            ctrl.skip_rest();
+            return;
+        }
+    };
+    let proxy = default_proxy(&state);
     proxy.handle(req, depot, res, ctrl).await;
 }
 
@@ -831,7 +934,8 @@ async fn proxy_for_transform(
     depot: &mut Depot,
     ctrl: &mut FlowCtrl,
 ) -> Result<(), anyhow::Error> {
-    let proxy = default_proxy();
+    let state = state::from_depot(depot)?;
+    let proxy = default_proxy(&state);
     let headers_ori = req.headers().clone();
     req.headers_mut().insert(
         http::header::ACCEPT,
@@ -842,14 +946,13 @@ async fn proxy_for_transform(
     Ok(())
 }
 
-// skip processing when product is plexamp
+// Plexamp and Live TV historically bypassed every Replex handler here by
+// proxying immediately and calling skip_rest(). Because this hoop is global,
+// that also bypassed mandatory resolution-policy and direct-part enforcement.
+// Keep the compatibility classification, but only store it as request-scoped
+// state. Security handlers ignore this flag; optional transforms may opt out.
 #[handler]
-async fn should_skip(
-    req: &mut Request,
-    res: &mut Response,
-    depot: &mut Depot,
-    ctrl: &mut FlowCtrl,
-) {
+async fn should_skip(req: &mut Request, depot: &mut Depot) {
     let context: PlexContext = req.extract().await.unwrap();
 
     let is_livetv = match context.path.clone() {
@@ -862,46 +965,50 @@ async fn should_skip(
         None => false,
     };
 
-    if is_livetv || is_plexamp {
-        let config: Config = Config::dynamic(req).extract().unwrap();
-        let proxy = default_proxy();
-
-        proxy.handle(req, depot, res, ctrl).await;
-        ctrl.skip_rest();
-    }
+    let _ = depot.insert(SKIP_OPTIONAL_TRANSFORMS_KEY, is_livetv || is_plexamp);
 }
 
-#[handler]
-async fn redirect_stream(
+fn photo_user_scope(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(token.as_bytes());
+    data_encoding::HEXLOWER.encode(&digest)[..16].to_string()
+}
+
+/// Build the account-scoped artwork cache key used by both live requests and
+/// the background warmer. Raw Plex tokens never appear in cache keys.
+pub(crate) fn photo_cache_key_for(raw: &str, token: Option<&str>) -> String {
+    let scope = token
+        .map(photo_user_scope)
+        .unwrap_or_else(|| "anon".to_string());
+    format!("photo:u:{scope}:{}", canonical_photo_key(raw))
+}
+
+async fn perform_stream_redirect(
     req: &mut Request,
-    _depot: &mut Depot,
+    depot: &Depot,
     res: &mut Response,
-) {
-    perform_stream_redirect(req, res).await
-}
-
-async fn perform_stream_redirect(req: &mut Request, res: &mut Response) {
-    let config: Config = Config::dynamic(req).extract().unwrap();
-    let redirect_url = if config.redirect_streams_host.clone().is_some() {
-        format!(
-            "{}{}",
-            config.redirect_streams_host.clone().unwrap(),
-            req.uri_mut().path_and_query().unwrap()
-        )
-    } else {
-        format!(
-            "{}{}",
-            config.host.unwrap(),
-            req.uri_mut().path_and_query().unwrap()
-        )
-    };
+) -> anyhow::Result<()> {
+    let config = app_config(depot)?;
+    let request = request_context(depot)?;
+    let base = config
+        .redirect_streams_host
+        .as_deref()
+        .unwrap_or(request.upstream_host.as_str());
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or(req.uri().path());
+    let redirect_url = format!("{base}{path_and_query}");
     let mime = mime_guess::from_path(req.uri().path()).first_or_octet_stream();
-    res.headers_mut()
-        .insert(CONTENT_TYPE, mime.as_ref().parse().unwrap());
+    if let Ok(content_type) = mime.as_ref().parse() {
+        res.headers_mut().insert(CONTENT_TYPE, content_type);
+    }
     res.render(Redirect::temporary(redirect_url));
+    Ok(())
 }
 
-/// Proxy a stream through Replex instead of 302-redirecting the client to the
+/// Proxy a stream through Replex instead of redirecting the client to the
 /// Plex origin. Used for restricted accounts so the byte path stays behind the
 /// policy check and the client never learns the Plex origin URL — required for
 /// resolution limits to be enforceable. The upstream fetch reuses the
@@ -916,14 +1023,48 @@ async fn proxy_stream_through_replex(
     ctrl.skip_rest();
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamDelivery {
+    Proxy,
+    Redirect,
+}
+
+fn stream_delivery(
+    restricted: bool,
+    redirects_enabled: bool,
+) -> StreamDelivery {
+    if restricted || !redirects_enabled {
+        StreamDelivery::Proxy
+    } else {
+        StreamDelivery::Redirect
+    }
+}
+
+async fn deliver_stream(
+    delivery: StreamDelivery,
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+    ctrl: &mut FlowCtrl,
+) -> anyhow::Result<()> {
+    match delivery {
+        StreamDelivery::Proxy => {
+            proxy_stream_through_replex(req, depot, res, ctrl).await;
+            Ok(())
+        }
+        StreamDelivery::Redirect => perform_stream_redirect(req, depot, res).await,
+    }
+}
+
 /// Stream gating by the resolution policy.
 ///
 /// Order matters: authenticate, apply policy, and only then serve the bytes.
-/// - Policy disabled: legacy behaviour (plain 302 redirect to the origin).
-/// - Unrestricted account: plain 302 redirect (no limit applies).
+/// - Policy disabled: obey the configured redirect mode.
+/// - Unrestricted account: obey the configured redirect mode.
 /// - Restricted account: the bytes are proxied THROUGH Replex, never handed
 ///   the Plex origin URL, so the limit stays enforceable. `/library/parts`
-///   requests are checked against the part policy cache; prohibited parts get
+///   requests are checked against cached resolution and bitrate classification
+///   facts; prohibited parts get
 ///   403 and unknown parts are blocked too (a restricted account may only
 ///   stream parts Replex has seen and permitted).
 /// - Transcode session requests: identity must verify (fail closed), then the
@@ -938,14 +1079,39 @@ async fn protected_redirect_stream(
     res: &mut Response,
     ctrl: &mut FlowCtrl,
 ) {
-    let config: Config = Config::dynamic(req).extract().unwrap();
+    let config = match app_config(depot) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::error!(error = %error, "stream request missing application configuration");
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            return;
+        }
+    };
     if !config.resolution_policy_enabled {
-        perform_stream_redirect(req, res).await;
+        if let Err(error) = deliver_stream(
+            stream_delivery(false, config.redirect_streams),
+            req,
+            depot,
+            res,
+            ctrl,
+        )
+        .await
+        {
+            tracing::error!(error = %error, "stream delivery failed");
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+        }
         return;
     }
 
-    let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = match PlexClient::from_context(&context) {
+    let context = match request_context(depot) {
+        Ok(context) => context.plex.clone(),
+        Err(error) => {
+            tracing::warn!(error = %error, "stream request missing Plex context");
+            res.status_code(StatusCode::BAD_REQUEST);
+            return;
+        }
+    };
+    let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "failed to build Plex client from request context");
@@ -954,12 +1120,17 @@ async fn protected_redirect_stream(
         }
     };
 
-    let identity = match plex_client.get_current_user().await {
-        Ok(identity) => identity,
-        Err(error) => {
-            if config.resolution_policy_fail_closed {
+    let (identity, policy) = match security_state(depot) {
+        Some(SecurityContextState::Resolved(security)) => {
+            (security.identity.clone(), security.policy.clone())
+        }
+        Some(SecurityContextState::Unavailable {
+            fail_closed,
+            reason,
+        }) => {
+            if fail_closed {
                 tracing::warn!(
-                    error = %error,
+                    error = %reason,
                     uri = ?req.uri(),
                     "Identity unavailable, failing closed on stream request"
                 );
@@ -967,25 +1138,56 @@ async fn protected_redirect_stream(
                 return;
             }
             tracing::warn!(
-                error = %error,
+                error = %reason,
                 uri = ?req.uri(),
                 "Identity unavailable, failing open on stream request"
             );
-            perform_stream_redirect(req, res).await;
+            if let Err(error) = deliver_stream(
+                stream_delivery(false, config.redirect_streams),
+                req,
+                depot,
+                res,
+                ctrl,
+            )
+            .await
+            {
+                tracing::error!(error = %error, "fail-open stream delivery failed");
+                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            }
             return;
         }
+        None => match plex_client.get_current_user().await {
+            Ok(identity) => {
+                let policy = resolve_policy(
+                    &config.user_resolution_policies,
+                    config.resolution_default,
+                    config.hidden_collections.as_deref().unwrap_or(&[]),
+                    &identity,
+                );
+                (identity, policy)
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "Identity unavailable on stream request");
+                res.status_code(StatusCode::SERVICE_UNAVAILABLE);
+                return;
+            }
+        },
     };
-
-    let policy = resolve_policy(
-        &config.user_resolution_policies,
-        config.resolution_default,
-        config.hidden_collections.as_deref().unwrap_or(&[]),
-        &identity,
-    );
-    if policy.is_unrestricted() {
-        // Unlimited accounts keep the direct-origin redirect for performance;
-        // no resolution limit applies to them.
-        perform_stream_redirect(req, res).await;
+    let stream_restricted =
+        !policy.is_unrestricted() || policy.max_bitrate.is_some();
+    if !stream_restricted {
+        if let Err(error) = deliver_stream(
+            stream_delivery(false, config.redirect_streams),
+            req,
+            depot,
+            res,
+            ctrl,
+        )
+        .await
+        {
+            tracing::error!(error = %error, "unrestricted stream delivery failed");
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+        }
         return;
     }
 
@@ -993,21 +1195,32 @@ async fn protected_redirect_stream(
     // decision is enforced and the client never learns the Plex origin URL. A
     // direct 302 to the origin would let the client bypass the limit entirely.
     if let Some(part_id) = req.param::<i64>("partid") {
-        let part_key = crate::plex_client::part_policy_key(
-            &identity.uuid,
-            &policy,
-            part_id,
-        );
-        match crate::plex_client::PART_POLICY_CACHE.get(&part_key).await {
-            Some(true) => {
+        match plex_client.part_media_cache.get(&part_id).await {
+            Some(classification)
+                if crate::plex_client::part_classification_allowed(
+                    classification,
+                    &policy,
+                ) =>
+            {
                 tracing::debug!(
                     username = %identity.username,
                     part_id = part_id,
                     "Permitted part requested; proxying through Replex"
                 );
-                proxy_stream_through_replex(req, depot, res, ctrl).await;
+                if let Err(error) = deliver_stream(
+                    stream_delivery(stream_restricted, config.redirect_streams),
+                    req,
+                    depot,
+                    res,
+                    ctrl,
+                )
+                .await
+                {
+                    tracing::error!(error = %error, "restricted part delivery failed");
+                    res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+                }
             }
-            Some(false) => {
+            Some(_) => {
                 tracing::info!(
                     username = %identity.username,
                     part_id = part_id,
@@ -1030,7 +1243,18 @@ async fn protected_redirect_stream(
 
     // Transcode session request for a restricted account: proxy through Replex
     // so the byte path is enforced too.
-    proxy_stream_through_replex(req, depot, res, ctrl).await
+    if let Err(error) = deliver_stream(
+        stream_delivery(stream_restricted, config.redirect_streams),
+        req,
+        depot,
+        res,
+        ctrl,
+    )
+    .await
+    {
+        tracing::error!(error = %error, "restricted transcode delivery failed");
+        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }
 
 // Google tv requests some weird thumbnail for hero elements. Let fix that
@@ -1063,7 +1287,11 @@ async fn fix_photo_transcode_request(
 
 // resolve a local media path to full url
 #[handler]
-async fn resolve_local_media_path(req: &mut Request, res: &mut Response) {
+async fn resolve_local_media_path(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) {
     let mut context: PlexContext = req.extract().await.unwrap();
     let url = req.query::<String>("url");
     if url.is_some() && url.clone().unwrap().contains("/replex/image/hero") {
@@ -1075,7 +1303,7 @@ async fn resolve_local_media_path(req: &mut Request, res: &mut Response) {
         //    context.token = Some(segments.last().unwrap().to_string());
         //}
 
-        let plex_client = match PlexClient::from_context(&context) {
+        let plex_client = match plex_client_from_depot(&context, depot) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to build Plex client from request context");
@@ -1097,6 +1325,10 @@ async fn disable_related_query(
     res: &mut Response,
     ctrl: &mut FlowCtrl,
 ) {
+    if skip_optional_transforms(depot) {
+        return;
+    }
+
     add_query_param_salvo(req, "includeRelated".to_string(), "0".to_string());
 }
 
@@ -1120,6 +1352,10 @@ async fn ntf_watchlist_force(
     res: &mut Response,
     ctrl: &mut FlowCtrl,
 ) {
+    if skip_optional_transforms(depot) {
+        return;
+    }
+
     // use memory_stats::memory_stats;
     // dbg!(memory_stats().unwrap().physical_mem / 1024 / 1000);
     let context: PlexContext = req.extract().await.unwrap();
@@ -1254,7 +1490,7 @@ pub async fn hero_image(
     let t = req.param::<String>("type").unwrap();
     let uuid = req.param::<String>("uuid").unwrap();
 
-    let plex_client = match PlexClient::from_context(&context) {
+    let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "failed to build Plex client from request context");
@@ -1283,9 +1519,13 @@ pub async fn direct_stream_fallback(
     ctrl: &mut FlowCtrl,
     depot: &mut Depot,
 ) -> Result<(), anyhow::Error> {
-    let config: Config = Config::dynamic(req).extract().unwrap();
-    let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = match PlexClient::from_context(&context) {
+    if skip_optional_transforms(depot) {
+        return Ok(());
+    }
+
+    let config = app_config(depot)?;
+    let context = request_context(depot)?.plex.clone();
+    let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "failed to build Plex client from request context");
@@ -1369,6 +1609,7 @@ pub async fn direct_stream_fallback(
 #[handler]
 pub async fn transform_policy_response(
     req: &mut Request,
+    depot: &mut Depot,
     res: &mut Response,
 ) -> Result<(), anyhow::Error> {
     // Only successful metadata payloads are worth parsing.
@@ -1376,7 +1617,7 @@ pub async fn transform_policy_response(
     if status != StatusCode::OK {
         return Ok(());
     }
-    apply_policy_transforms(req, res).await
+    apply_policy_transforms(req, depot, res).await
 }
 
 /// Parse the RAW upstream JSON body currently held in `res` and apply the
@@ -1387,6 +1628,7 @@ pub async fn transform_policy_response(
 /// never served as an authorisation decision.
 async fn apply_policy_transforms(
     req: &mut Request,
+    depot: &mut Depot,
     res: &mut Response,
 ) -> Result<(), anyhow::Error> {
     let content_type = get_content_type_from_headers(req.headers_mut());
@@ -1408,8 +1650,8 @@ async fn apply_policy_transforms(
         };
     container.content_type = content_type;
 
-    let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = match PlexClient::from_context(&context) {
+    let context = request_context(depot)?.plex.clone();
+    let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "failed to build Plex client from request context");
@@ -1427,16 +1669,12 @@ async fn apply_policy_transforms(
     Ok(())
 }
 
-/// Hub responses fetched through Replex's shared response cache.
+/// Hub responses fetched through Replex's account-scoped response cache.
 ///
-/// Upstream hub payloads are identical for every user BEFORE per-user
-/// transforms run (restrictions, visibility, resolution filtering all apply
-/// downstream), so the raw fetch is shared across accounts. The cache key is
-/// canonical: only the directory-selection and paging params define the
-/// payload identity. Everything else clients attach (counts, field excludes,
-/// X-Plex-* metadata) varies per client shape; folding those into the key
-/// would fragment the shared cache so every client shape pays its own slow
-/// cold fetch. Per-request shaping happens after the transforms instead.
+/// The path component is canonical: only directory selection and paging
+/// params define the payload shape. Account identity is added separately by
+/// `hub_cache_key`, because even section discovery metadata is subject to Plex
+/// library sharing and must never be reused across account tokens.
 pub(crate) fn cache_key_for_request(req: &Request) -> String {
     let path = req.uri().path();
     let queries = req.queries();
@@ -1527,9 +1765,12 @@ fn shape_canonical_hubs(
 pub async fn cached_hubs_response(
     req: &mut Request,
     res: &mut Response,
+    depot: &mut Depot,
 ) -> Result<(), anyhow::Error> {
+    let compatibility_passthrough = skip_optional_transforms(depot);
+
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = match PlexClient::from_context(&context) {
+    let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "failed to build Plex client from request context");
@@ -1540,15 +1781,11 @@ pub async fn cached_hubs_response(
 
     let key_path = cache_key_for_request(req);
     let fetch_path = canonical_fetch_path(req, &key_path);
-    let config: Config = Config::dynamic(req).extract().unwrap();
+    let config = app_config(depot)?;
 
-    // Shared raw-response cache for genuinely global discovery rows, keyed
-    // WITHOUT the client token so the warmer (admin token) and every user
-    // read/write the same entries. Account-specific hubs (Continue Watching,
-    // On Deck, home/promoted rows with personal membership) get a
-    // token-hash-scoped key so one account can never be served another
-    // account's payload. Per-user transforms still run below on every
-    // request either way.
+    // Raw hub payloads are always account scoped. The canonical path removes
+    // client-shaping noise while `hub_cache_key` adds a token hash, so the
+    // warmer and live requests share entries only within the same account.
     let cache_key =
         crate::hub_cache::hub_cache_key(&key_path, context.token.as_deref());
     let mut container: MediaContainerWrapper<MediaContainer> =
@@ -1594,16 +1831,27 @@ pub async fn cached_hubs_response(
 
     let hubs_before = container.media_container.children().len();
 
-    TransformBuilder::new(plex_client, context.clone())
+    // Collection visibility is account policy, not presentation behaviour.
+    // It must run even for Plexamp / Live TV compatibility requests so a
+    // client-controlled product or path cannot reveal a hidden collection.
+    TransformBuilder::new(plex_client.clone(), context.clone())
         .with_transform(CollectionVisibilityTransform)
-        .with_transform(HubRestrictionTransform)
-        .with_transform(HubStyleTransform { is_home: true })
-        .with_transform(HubWatchedTransform)
-        .with_transform(HubInterleaveTransform)
-        .with_transform(UserStateTransform)
-        .with_transform(HubKeyTransform)
         .apply_to(&mut container)
         .await;
+
+    if !compatibility_passthrough {
+        TransformBuilder::new(plex_client, context.clone())
+            .with_transform(HubRestrictionTransform)
+            .with_transform(HubStyleTransform { is_home: true })
+            .with_transform(HubWatchedTransform)
+            .with_transform(HubInterleaveTransform)
+            .with_transform(UserStateTransform)
+            .with_transform(HubKeyTransform)
+            .apply_to(&mut container)
+            .await;
+
+        shape_canonical_hubs(&mut container, &context);
+    }
 
     tracing::debug!(
         uri = %req.uri(),
@@ -1613,8 +1861,6 @@ pub async fn cached_hubs_response(
         "hub payload transformed"
     );
 
-    shape_canonical_hubs(&mut container, &context);
-
     res.render(container);
     Ok(())
 }
@@ -1622,10 +1868,11 @@ pub async fn cached_hubs_response(
 #[handler]
 pub async fn transform_hubs_response(
     req: &mut Request,
+    depot: &mut Depot,
     res: &mut Response,
 ) -> Result<(), anyhow::Error> {
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = match PlexClient::from_context(&context) {
+    let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "failed to build Plex client from request context");
@@ -1656,10 +1903,22 @@ pub async fn transform_hubs_response(
 #[handler]
 pub async fn transform_req_content_directory(
     req: &mut Request,
+    depot: &mut Depot,
     res: &mut Response,
     ctrl: &mut FlowCtrl,
 ) {
-    let config: Config = Config::dynamic(req).extract().unwrap();
+    if skip_optional_transforms(depot) {
+        return;
+    }
+
+    let config = match app_config(depot) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::error!(error = %error, "content directory transform missing configuration");
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            return;
+        }
+    };
 
     // Interleave disabled: pass requests through untouched so clients get
     // native per-library hub responses.
@@ -1667,9 +1926,15 @@ pub async fn transform_req_content_directory(
         return;
     }
 
-    let config: Config = Config::dynamic(req).extract().unwrap();
-    let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = match PlexClient::from_context(&context) {
+    let context = match request_context(depot) {
+        Ok(context) => context.plex.clone(),
+        Err(error) => {
+            tracing::warn!(error = %error, "content directory transform missing request context");
+            res.status_code(StatusCode::BAD_REQUEST);
+            return;
+        }
+    };
+    let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "failed to build Plex client from request context");
@@ -1745,16 +2010,43 @@ pub async fn transform_req_content_directory(
 #[handler]
 pub async fn transform_req_include_guids(
     req: &mut Request,
+    depot: &mut Depot,
     res: &mut Response,
 ) {
+    if skip_optional_transforms(depot) {
+        return;
+    }
+
     add_query_param_salvo(req, "includeGuids".to_string(), "1".to_string());
 }
 
 // some androids have trouble loading more for hero style. So load more at once
 #[handler]
-pub async fn transform_req_android(req: &mut Request, res: &mut Response) {
-    let config: Config = Config::dynamic(req).extract().unwrap();
-    let context: PlexContext = req.extract().await.unwrap();
+pub async fn transform_req_android(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) {
+    if skip_optional_transforms(depot) {
+        return;
+    }
+
+    let config = match app_config(depot) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::error!(error = %error, "Android request transform missing configuration");
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            return;
+        }
+    };
+    let context = match request_context(depot) {
+        Ok(context) => context.plex.clone(),
+        Err(error) => {
+            tracing::warn!(error = %error, "Android request transform missing request context");
+            res.status_code(StatusCode::BAD_REQUEST);
+            return;
+        }
+    };
 
     let mut count = context.clone().count.unwrap_or(25);
     match context.platform.unwrap_or_default() {
@@ -1773,18 +2065,19 @@ pub async fn transform_req_android(req: &mut Request, res: &mut Response) {
 #[handler]
 pub async fn get_collections_children(
     req: &mut Request,
-    _depot: &mut Depot,
+    depot: &mut Depot,
     res: &mut Response,
 ) -> Result<(), anyhow::Error> {
-    let config: Config = Config::dynamic(req).extract().unwrap();
-    let context: PlexContext = req.extract().await.unwrap();
-    let collection_ids = req.param::<String>("ids").unwrap();
+    let config = app_config(depot)?;
+    let context = request_context(depot)?.plex.clone();
+    let collection_ids = req
+        .param::<String>("ids")
+        .ok_or_else(|| anyhow::anyhow!("missing collection ids"))?;
     let collection_ids: Vec<u32> = collection_ids
         .split(',')
-        .filter(|&v| !v.parse::<u32>().is_err())
-        .map(|v| v.parse().unwrap())
+        .filter_map(|v| v.parse::<u32>().ok())
         .collect();
-    let plex_client = match PlexClient::from_context(&context) {
+    let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "failed to build Plex client from request context");
@@ -1808,7 +2101,7 @@ pub async fn get_collections_children(
         MediaContainerWrapper::default();
     container.content_type = content_type;
     let size = container.media_container.children().len();
-    container.media_container.size = Some(size.try_into().unwrap());
+    container.media_container.size = Some(i64::try_from(size).unwrap_or(i64::MAX));
     container.media_container.offset = Some(offset);
 
     // filtering of watched happens in the transform
@@ -1838,12 +2131,12 @@ pub async fn get_collections_children(
 #[handler]
 pub async fn default_transform(
     req: &mut Request,
-    _depot: &mut Depot,
+    depot: &mut Depot,
     res: &mut Response,
 ) -> Result<(), anyhow::Error> {
-    let config: Config = Config::dynamic(req).extract().unwrap();
-    let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = match PlexClient::from_context(&context) {
+    let config = app_config(depot)?;
+    let context = request_context(depot)?.plex.clone();
+    let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "failed to build Plex client from request context");
@@ -1851,8 +2144,12 @@ pub async fn default_transform(
         }
     };
     let content_type = get_content_type_from_headers(req.headers_mut());
-    let style = req.param::<Style>("style").unwrap();
-    let rest_path = req.param::<String>("**rest").unwrap();
+    let style = req
+        .param::<Style>("style")
+        .ok_or_else(|| anyhow::anyhow!("missing or invalid style"))?;
+    let rest_path = req
+        .param::<String>("**rest")
+        .ok_or_else(|| anyhow::anyhow!("missing transform path"))?;
 
     // We dont listen to pagination. We have a hard max of 250 per collection
     let mut limit: i32 = 250;
@@ -1864,9 +2161,9 @@ pub async fn default_transform(
         offset = context.container_start.unwrap_or(0);
     }
 
-    let mut url = Url::parse(req.uri_mut().to_string().as_str()).unwrap();
+    let mut url = Url::parse(req.uri().to_string().as_str())?;
     url.set_path(&rest_path);
-    req.set_uri(hyper::Uri::try_from(url.as_str()).unwrap());
+    req.set_uri(hyper::Uri::try_from(url.as_str())?);
 
     // patch, plex seems to pass wrong contentdirid, probaply cause we all load it inti the first
     let mut queries = req.queries().clone();
@@ -1902,10 +2199,28 @@ pub async fn default_transform(
 }
 
 #[handler]
-pub async fn get_library_item_metadata(req: &mut Request, res: &mut Response) {
-    let config: Config = Config::dynamic(req).extract().unwrap();
-    let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = match PlexClient::from_context(&context) {
+pub async fn get_library_item_metadata(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) {
+    let config = match app_config(depot) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::error!(error = %error, "library metadata handler missing configuration");
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            return;
+        }
+    };
+    let context = match request_context(depot) {
+        Ok(context) => context.plex.clone(),
+        Err(error) => {
+            tracing::warn!(error = %error, "library metadata handler missing request context");
+            res.status_code(StatusCode::BAD_REQUEST);
+            return;
+        }
+    };
+    let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "failed to build Plex client from request context");
@@ -1923,7 +2238,14 @@ pub async fn get_library_item_metadata(req: &mut Request, res: &mut Response) {
         );
     }
 
-    let upstream_res = plex_client.request(req).await.unwrap();
+    let upstream_res = match plex_client.request(req).await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::error!(error = %error, uri = ?req.uri(), "Plex upstream request failed");
+            res.status_code(StatusCode::BAD_GATEWAY);
+            return;
+        }
+    };
     let mut container: MediaContainerWrapper<MediaContainer> =
         match from_reqwest_response(upstream_res).await {
             Ok(r) => r,
@@ -1947,16 +2269,23 @@ pub async fn get_library_item_metadata(req: &mut Request, res: &mut Response) {
 //     HashMap::from([("1080p", "1920x1080"), ("4k", "4096x2160")]);
 
 #[handler]
-async fn force_maximum_quality(req: &mut Request) -> Result<(), anyhow::Error> {
-    let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = match PlexClient::from_context(&context) {
+async fn force_maximum_quality(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<(), anyhow::Error> {
+    if skip_optional_transforms(depot) {
+        return Ok(());
+    }
+
+    let context = request_context(depot)?.plex.clone();
+    let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "failed to build Plex client from request context");
             return Err(e);
         }
     };
-    let config: Config = Config::dynamic(req).extract().unwrap();
+    let config = app_config(depot)?;
     let mut queries = req.queries().clone();
 
     if queries.get("maxVideoBitrate").is_none()
@@ -1981,10 +2310,23 @@ async fn force_maximum_quality(req: &mut Request) -> Result<(), anyhow::Error> {
 
     // some clients send wrong buffer format
     if let Some(size) = queries.remove("mediaBufferSize") {
-        queries.insert(
-            "mediaBufferSize".to_string(),
-            (size[0].parse::<f32>().unwrap() as i64).to_string(),
-        );
+        if let Some(raw_size) = size.first() {
+            match raw_size.parse::<f32>() {
+                Ok(parsed) => {
+                    queries.insert(
+                        "mediaBufferSize".to_string(),
+                        (parsed as i64).to_string(),
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(value = %raw_size, error = %error, "Ignoring malformed mediaBufferSize");
+                    queries.insert(
+                        "mediaBufferSize".to_string(),
+                        raw_size.clone(),
+                    );
+                }
+            }
+        }
     }
     // if let Some(i) = req.queries().get("protocol") {
     //     if i == "http" {
@@ -2018,20 +2360,26 @@ async fn force_maximum_quality(req: &mut Request) -> Result<(), anyhow::Error> {
             .await
             .unwrap();
 
-        let media_index: usize = if req.queries().get("mediaIndex").is_none()
-            || req.queries().get("mediaIndex").unwrap() == "-1"
-        {
-            0
-        } else {
-            req.queries()
-                .get("mediaIndex")
-                .unwrap()
-                .parse::<usize>()
-                .unwrap()
-        };
+        let media_index = req
+            .queries()
+            .get("mediaIndex")
+            .filter(|value| *value != "-1")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
 
-        let media_item =
-            item.media_container.metadata[0].media[media_index].clone();
+        let Some(media_item) = item
+            .media_container
+            .metadata
+            .first()
+            .and_then(|metadata| metadata.media.get(media_index))
+            .cloned()
+        else {
+            tracing::warn!(
+                media_index,
+                "Ignoring invalid mediaIndex in force maximum quality request"
+            );
+            return Ok(());
+        };
 
         for reso in resos {
             if let Some(video_resolution) = media_item.video_resolution.clone()
@@ -2059,7 +2407,7 @@ async fn force_maximum_quality(req: &mut Request) -> Result<(), anyhow::Error> {
 //     media_index: usize,
 // ) -> Result<(), anyhow::Error> {
 //     let context: PlexContext = req.extract().await.unwrap();
-//     let plex_client = PlexClient::from_context(&context);
+//     let plex_client = plex_client_from_depot(&context, depot);
 //     let mut queries = req.queries().clone();
 //     let mut original_queries = req.queries().clone();
 
@@ -2116,9 +2464,10 @@ pub struct TranscodingStatus {
 
 async fn get_transcoding_for_request(
     req: &mut Request,
+    depot: &Depot,
 ) -> Result<TranscodingStatus, anyhow::Error> {
-    let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = match PlexClient::from_context(&context) {
+    let context = request_context(depot)?.plex.clone();
+    let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "failed to build Plex client from request context");
@@ -2126,18 +2475,9 @@ async fn get_transcoding_for_request(
         }
     };
 
-    let mut res = &mut Response::new();
-    let mut depot = &mut Depot::new();
-    let mut ctrl = &mut FlowCtrl::new(vec![]);
-    proxy_for_transform.handle(req, depot, res, ctrl).await;
-    dbg!(&res);
-
-    let ress = plex_client.proxy_request(&req).await?;
-    dbg!(&ress);
-    //dbg!(&req);
-
+    let response = plex_client.proxy_request(req).await?;
     let transcode: MediaContainerWrapper<MediaContainer> =
-        from_salvo_response(res).await?;
+        from_reqwest_response(response).await?;
     let mut is_transcoding = false;
 
     if transcode.media_container.size.is_some()
@@ -2176,15 +2516,19 @@ async fn video_transcode_fallback(
     res: &mut salvo::Response,
     ctrl: &mut FlowCtrl,
 ) -> Result<(), anyhow::Error> {
+    if skip_optional_transforms(depot) {
+        return Ok(());
+    }
+
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = match PlexClient::from_context(&context) {
+    let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "failed to build Plex client from request context");
             return Err(e);
         }
     };
-    let config: Config = Config::dynamic(req).extract().unwrap();
+    let config = app_config(depot)?;
     let mut queries = req.queries().clone();
     let original_queries = req.queries().clone();
     let media_index: usize = if req.queries().get("mediaIndex").is_none()
@@ -2242,7 +2586,7 @@ async fn video_transcode_fallback(
         let mut fallback_selected = false;
         // this could fail.
         let status: TranscodingStatus =
-            get_transcoding_for_request(req).await?;
+            get_transcoding_for_request(req, depot).await?;
         let selected_media = item.media_container.metadata[0].media[0].clone();
         let mut available_media_ids: Vec<i64> = item.media_container.metadata
             [0]
@@ -2376,7 +2720,7 @@ async fn video_transcode_fallback(
                     }
 
                     let status: TranscodingStatus =
-                        get_transcoding_for_request(req).await?;
+                        get_transcoding_for_request(req, depot).await?;
                     available_media_ids.retain(|x| *x != media.id);
                     if status.is_transcoding && available_media_ids.len() != 0 {
                         tracing::debug!(
@@ -2414,16 +2758,17 @@ async fn video_transcode_fallback(
 #[handler]
 async fn enforce_resolution_policy(
     req: &mut Request,
+    depot: &mut Depot,
     res: &mut Response,
     ctrl: &mut FlowCtrl,
 ) -> Result<(), anyhow::Error> {
-    let config: Config = Config::dynamic(req).extract().unwrap();
+    let config = app_config(depot)?;
     if !config.resolution_policy_enabled {
         return Ok(());
     }
 
-    let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = match PlexClient::from_context(&context) {
+    let context = request_context(depot)?.plex.clone();
+    let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "failed to build Plex client from request context");
@@ -2431,12 +2776,17 @@ async fn enforce_resolution_policy(
         }
     };
 
-    let identity = match plex_client.get_current_user().await {
-        Ok(identity) => identity,
-        Err(error) => {
-            if config.resolution_policy_fail_closed {
+    let (identity, policy) = match security_state(depot) {
+        Some(SecurityContextState::Resolved(security)) => {
+            (security.identity.clone(), security.policy.clone())
+        }
+        Some(SecurityContextState::Unavailable {
+            fail_closed,
+            reason,
+        }) => {
+            if fail_closed {
                 tracing::warn!(
-                    error = %error,
+                    error = %reason,
                     "Identity unavailable, failing closed on playback request"
                 );
                 res.status_code(StatusCode::SERVICE_UNAVAILABLE);
@@ -2444,19 +2794,22 @@ async fn enforce_resolution_policy(
                 return Ok(());
             }
             tracing::warn!(
-                error = %error,
+                error = %reason,
                 "Identity unavailable, failing open on playback request"
             );
             return Ok(());
         }
+        None => {
+            let identity = plex_client.get_current_user().await?;
+            let policy = resolve_policy(
+                &config.user_resolution_policies,
+                config.resolution_default,
+                config.hidden_collections.as_deref().unwrap_or(&[]),
+                &identity,
+            );
+            (identity, policy)
+        }
     };
-
-    let policy = resolve_policy(
-        &config.user_resolution_policies,
-        config.resolution_default,
-        config.hidden_collections.as_deref().unwrap_or(&[]),
-        &identity,
-    );
     if policy.is_unrestricted() && policy.max_bitrate.is_none() {
         return Ok(());
     }
@@ -2508,15 +2861,24 @@ async fn enforce_resolution_policy(
         }
     };
 
-    let media = &item.media_container.metadata[0].media;
+    let Some(metadata) = item.media_container.metadata.first() else {
+        tracing::warn!("Plex item response contained no metadata");
+        if config.resolution_policy_fail_closed {
+            res.status_code(StatusCode::BAD_GATEWAY);
+            ctrl.skip_rest();
+        }
+        return Ok(());
+    };
+    let media = &metadata.media;
     if media.is_empty() {
         return Ok(());
     }
 
-    // Record which parts belong to permitted versions so direct
-    // /library/parts requests can be validated later. Scoped to this
-    // account and its current policy; never shared across users.
-    cache_part_policy(media, &policy, &identity.uuid).await;
+    // Record immutable media classification facts for each part. Direct part
+    // requests evaluate the current account policy against these facts, so a
+    // later policy change takes effect immediately without stale permission
+    // booleans in the cache.
+    plex_client.cache_part_classification(media).await;
 
     let screen_resolution = context
         .screen_resolution
@@ -2591,9 +2953,13 @@ async fn enforce_resolution_policy(
 /// When multiple qualities are avaiable, select the most relevant one.
 /// Does not work for every client as some client decides themselfs which version to use.
 #[handler]
-async fn auto_select_version(req: &mut Request) {
+async fn auto_select_version(req: &mut Request, depot: &mut Depot) {
+    if skip_optional_transforms(depot) {
+        return;
+    }
+
     let context: PlexContext = req.extract().await.unwrap();
-    let plex_client = match PlexClient::from_context(&context) {
+    let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "failed to build Plex client from request context");
@@ -2691,6 +3057,30 @@ mod tests {
     use salvo::prelude::*;
     use salvo::test::{ResponseExt, TestClient};
 
+    #[test]
+    fn stream_delivery_matrix_is_security_first() {
+        assert_eq!(
+            stream_delivery(true, true),
+            StreamDelivery::Proxy,
+            "restricted accounts must proxy even when redirects are enabled"
+        );
+        assert_eq!(
+            stream_delivery(true, false),
+            StreamDelivery::Proxy,
+            "restricted accounts must proxy when redirects are disabled"
+        );
+        assert_eq!(
+            stream_delivery(false, true),
+            StreamDelivery::Redirect,
+            "unrestricted accounts redirect only when configured"
+        );
+        assert_eq!(
+            stream_delivery(false, false),
+            StreamDelivery::Proxy,
+            "unrestricted accounts proxy when redirects are disabled"
+        );
+    }
+
     #[rstest]
     #[case::hubs_sections(
         "/hubs/sections/6",
@@ -2773,6 +3163,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plexamp_hubs_still_enforce_collection_visibility() {
+        let _ = tracing_subscriber::fmt::try_init();
+        let server = httpmock::MockServer::start();
+
+        let _identity = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/api/v2/user")
+                .header("X-Plex-Token", "limited-token");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"id": 2, "uuid": "uuid-limited", "username": "limited"}"#,
+                );
+        });
+        let hubs = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/hubs/sections/99")
+                .header("X-Plex-Token", "limited-token");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body_from_file("tests/mock/in/hubs_sections_6.json");
+        });
+
+        let _env = pin_default_env(&server.address().to_string());
+        std::env::set_var("REPLEX_IDENTITY_API_BASE", server.base_url());
+        std::env::set_var("REPLEX_RESOLUTION_POLICY_ENABLED", "true");
+        std::env::set_var("REPLEX_RESOLUTION_DEFAULT", "unlimited");
+        std::env::set_var("REPLEX_HIDDEN_COLLECTIONS", "Trending");
+
+        let service = Service::new(super::route());
+        let mut response =
+            TestClient::get("http://127.0.0.1:5800/hubs/sections/99")
+                .add_header("HOST", &server.address().to_string(), true)
+                .add_header("X-Plex-Token", "limited-token", true)
+                .add_header("X-Plex-Client-Identifier", "limited-client", true)
+                .add_header("X-Plex-Product", "Plexamp", true)
+                .add_header("Accept", "application/json", true)
+                .send(&service)
+                .await;
+
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        assert_eq!(hubs.hits(), 1, "Plexamp hub request must fetch upstream");
+
+        let body = response.take_string().await.unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let titles: Vec<&str> = json["MediaContainer"]["Hub"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|hub| hub["title"].as_str())
+            .collect();
+
+        assert!(
+            !titles.contains(&"Trending"),
+            "Plexamp compatibility mode must not reveal hidden collections: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn section_hub_cache_isolated_between_account_tokens() {
+        let server = httpmock::MockServer::start();
+        let account_a = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/hubs/sections/77")
+                .header("X-Plex-Token", "hub-account-a");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"MediaContainer":{"size":1,"Hub":[{"key":"/a","title":"Account A","type":"movie"}]}}"#);
+        });
+        let account_b = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/hubs/sections/77")
+                .header("X-Plex-Token", "hub-account-b");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"MediaContainer":{"size":1,"Hub":[{"key":"/b","title":"Account B","type":"movie"}]}}"#);
+        });
+
+        let _env = pin_default_env(&server.address().to_string());
+        let service = Service::new(super::route());
+
+        async fn hub_title(service: &Service, token: &str) -> String {
+            let mut response =
+                TestClient::get("http://127.0.0.1:5800/hubs/sections/77")
+                    .add_header("HOST", "127.0.0.1:5800", true)
+                    .add_header("X-Plex-Token", token, true)
+                    .add_header(
+                        "X-Plex-Client-Identifier",
+                        "hub-cache-test",
+                        true,
+                    )
+                    .add_header("Accept", "application/json", true)
+                    .send(service)
+                    .await;
+            let body = response.take_string().await.unwrap();
+            let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+            json["MediaContainer"]["Hub"][0]["title"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+
+        assert_eq!(hub_title(&service, "hub-account-a").await, "Account A");
+        assert_eq!(hub_title(&service, "hub-account-b").await, "Account B");
+        assert_eq!(hub_title(&service, "hub-account-a").await, "Account A");
+        assert_eq!(
+            account_a.hits(),
+            1,
+            "account A should reuse only its own cache entry"
+        );
+        assert_eq!(
+            account_b.hits(),
+            1,
+            "account B must fetch its own authorised payload"
+        );
+    }
+
+    #[tokio::test]
     async fn timeline_stop_marks_hubs_stale() {
         let _ = tracing_subscriber::fmt::try_init();
         let mock_server = get_mock_server();
@@ -2812,6 +3320,69 @@ mod tests {
             .await,
             "timeline stop observed through the proxy must mark hubs stale"
         );
+    }
+
+    #[test]
+    fn photo_cache_keys_are_account_scoped_but_token_placement_is_canonical() {
+        let raw = "/photo/:/transcode?width=300&height=450&url=%2Flibrary%2Fmetadata%2F1%2Fthumb%2F123";
+        let a = photo_cache_key_for(raw, Some("token-a"));
+        let a_again = photo_cache_key_for(raw, Some("token-a"));
+        let b = photo_cache_key_for(raw, Some("token-b"));
+
+        assert_eq!(a, a_again);
+        assert_ne!(a, b, "different accounts must not share Plex artwork");
+        assert!(a.starts_with("photo:u:"));
+        assert!(!a.contains("token-a"), "raw token must not appear in key");
+
+        let with_top_level_token = format!("{raw}&X-Plex-Token=token-a");
+        assert_eq!(
+            a,
+            photo_cache_key_for(&with_top_level_token, Some("token-a")),
+            "token placement must not fragment one account's artwork cache"
+        );
+
+        assert_eq!(
+            extract_inner_token(
+                "/library/metadata/1/thumb/123?width=300&X-Plex-Token=nested-token&height=450"
+            )
+            .as_deref(),
+            Some("nested-token"),
+            "nested photo authentication must be recoverable for account scoping"
+        );
+        assert_eq!(
+            strip_inner_token(
+                "/library/metadata/1/thumb/123?width=300&X-Plex-Token=nested-token&height=450"
+            ),
+            "/library/metadata/1/thumb/123?width=300&height=450",
+            "removing nested authentication must preserve later image parameters"
+        );
+    }
+
+    #[tokio::test]
+    async fn photo_memory_cache_cannot_cross_account_scope() {
+        let raw = "/photo/:/transcode?width=300&url=%2Flibrary%2Fmetadata%2F987%2Fthumb%2F1";
+        let a = photo_cache_key_for(raw, Some("photo-account-a"));
+        let b = photo_cache_key_for(raw, Some("photo-account-b"));
+        PHOTO_CACHE.invalidate(&a).await;
+        PHOTO_CACHE.invalidate(&b).await;
+
+        PHOTO_CACHE
+            .insert(
+                a.clone(),
+                CachedImage {
+                    content_type: Some("image/jpeg".to_string()),
+                    cache_control: None,
+                    body: b"account-a-image".to_vec(),
+                },
+            )
+            .await;
+
+        assert!(PHOTO_CACHE.get(&a).await.is_some());
+        assert!(
+            PHOTO_CACHE.get(&b).await.is_none(),
+            "account B must not hit artwork cached by account A"
+        );
+        PHOTO_CACHE.invalidate(&a).await;
     }
 
     #[tokio::test]

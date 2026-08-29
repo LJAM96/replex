@@ -94,7 +94,7 @@ Settings are set via [environment variables](https://kinsta.com/knowledgebase/wh
 | REPLEX_VIDEO_TRANSCODE_FALLBACK_FOR    |     | If the selected media triggers a video transcode. Fallback to another version of the media. Only triggers on video transcoding. Remuxing is still allowed. <br />Options are "4k" and "1080". <br /> <br /> Example if  REPLEX_VIDEO_TRANSCODE_FALLBACK_FOR is set to "4k" then 4k transcodes will fallback to another version if avaiable |
 | REPLEX_AUTO_SELECT_VERSION    | false    | If you have multiple versions of a media item then this setting will choose the one thats closest to the client resolution. So a 1080p TV will get the 1080P version while 4k gets the 4k version. A user can still override this by selecting a different version from the client.   |
 | REPLEX_DISABLE_RELATED  | false | See: https://github.com/lostb1t/replex/issues/26.        |
-| REPLEX_REDIRECT_STREAMS  | false    | For **unlimited** accounts, 302-redirect stream bytes directly to the Plex origin (best performance). Restricted accounts are **always proxied through Replex** regardless of this setting, so their resolution limit stays enforceable. Set `false` to proxy every stream. |
+| REPLEX_REDIRECT_STREAMS  | false    | For **fully unrestricted** accounts, temporarily redirect stream bytes directly to the Plex origin (best performance). Accounts with a resolution or bitrate restriction are **always proxied through Replex** regardless of this setting, so their policy stays enforceable. Set `false` to proxy every stream. |
 | REPLEX_REDIRECT_STREAMS_HOST  | REPLEX_HOST    | Alternative streams endpoint                                         |
 | REPLEX_CACHE_TTL          | 1800    	 | Time to live for general caches in seconds. Set to 0 to disable (higly recommended to keep enabled besides testing purposes).  |
 | REPLEX_WARM_INTERVAL      | 300    	 | Seconds between background warmer cycles that pre-fetch hot hub payloads with the admin token so clients never pay the slow cold fetch. 0 disables warming.  |
@@ -151,7 +151,6 @@ REPLEX_USER_RESOLUTION_POLICIES=[{"username": "jodie", "max_resolution": "1080"}
 
 REPLEX_RESOLUTION_DEFAULT=unlimited
 REPLEX_RESOLUTION_POLICY_FAIL_CLOSED=true
-REPLEX_STRICT_STREAM_GUARD=false
 ```
 
 | Setting | Default | Description |
@@ -160,21 +159,27 @@ REPLEX_STRICT_STREAM_GUARD=false
 | REPLEX_USER_RESOLUTION_POLICIES | | JSON array of per-account rules. Each entry needs `username` and/or `uuid` plus `max_resolution` (`480`, `720`, `1080`, `4k`, `unlimited`). Optional `max_bitrate` (kbps) caps playback bitrate for that account — it applies even when the resolution is `unlimited`, and requests above the cap are lowered while lower requests are left alone. Optional `visible_collections` lists collection titles this account can see despite the global hidden default — everyone else has them hidden. UUID is the stable identifier (visible in server logs at identity resolution time); username matching is case sensitive. |
 | REPLEX_RESOLUTION_DEFAULT | unlimited | Limit applied to accounts without an explicit rule. |
 | REPLEX_RESOLUTION_POLICY_FAIL_CLOSED | true | If the account identity cannot be verified (plex.tv unreachable, invalid token) playback requests fail with 503 instead of being allowed unrestricted. Cached identities mean brief plex.tv outages are invisible. |
-| REPLEX_STRICT_STREAM_GUARD | false | Reject direct `/library/parts` requests for parts Replex has never seen in metadata or playback (hand-crafted deep links). Disabled keeps legacy behaviour for unknown parts. |
 | REPLEX_HIDDEN_COLLECTIONS | | Comma separated list of collection titles hidden from **all** accounts. Accounts with a matching `visible_collections` entry in their policy see them normally. Exact title match (case sensitive, emoji included). |
-| REPLEX_IDENTITY_CACHE_TTL | 3600 | How long verified account identities are cached, seconds. |
+| REPLEX_TOKEN_IDENTITY_MAP | | Preferred fallback for Plex tokens that the Plex account APIs cannot identify. JSON object keyed by the lowercase SHA256 fingerprint of the raw Plex token. Each value may be a username string, or an object containing `username` and optional `client_identifier` fields when an additional client identifier constraint is required. Raw tokens are never stored in this map. This fallback is consulted only after Plex identity, shared-resource identity, and shared-server token matching have failed. |
+| REPLEX_CLIENT_IDENTITY_MAP | | Legacy migration fallback for opaque tokens. JSON object mapping `X-Plex-Client-Identifier` values to usernames. Client identifiers are supplied by the caller and are therefore not credentials. Prefer `REPLEX_TOKEN_IDENTITY_MAP`; keep this setting only for clients that cannot yet be migrated. |
+| REPLEX_ALLOW_USERNAME_FALLBACK | false | Last-resort compatibility mode that trusts the client supplied Plex username when every stronger identity method fails. Disabled by default because the header is spoofable. |
+| REPLEX_IDENTITY_CACHE_TTL | 3600 | How long resolved account identities are cached, seconds. This includes Plex-verified, shared-token, and explicitly configured fallback identities. |
 | REPLEX_IDENTITY_API_BASE | https://plex.tv | Identity API override, for testing only. |
 
 How it works:
 
-* The request's own Plex token is verified against plex.tv to identify the
-  account — client-supplied usernames are ignored.
+* The request's own Plex token is verified against plex.tv first. Server scoped
+  and device scoped shared-user tokens are then resolved through Plex resources
+  and the administrator shared-server list. Only if those methods fail does
+  Replex consult `REPLEX_TOKEN_IDENTITY_MAP` using SHA256 of the request token.
+  The legacy client identifier map comes after that, and the client supplied
+  username is considered only when `REPLEX_ALLOW_USERNAME_FALLBACK=true`.
 * Metadata responses have prohibited versions removed before clients see
   them; items that only exist above the limit disappear entirely.
 * Playback requests with a version above the limit are rewritten to the best
   permitted version; transcode fallback can never cross the limit.
-* Direct media part URLs belonging to prohibited versions return 403; for restricted accounts, **unknown** parts (Replex has never seen in metadata/playback) are blocked too. Restricted accounts' part and transcode-session streams are proxied through Replex rather than 302-redirected, so the client never receives the Plex origin URL.
-* Accounts without a rule (or `unlimited`) behave exactly as stock Replex; their streams may be 302-redirected straight to the origin for performance when `REPLEX_REDIRECT_STREAMS` is enabled.
+* Direct media part URLs whose cached resolution or source bitrate violates the current policy return 403. For restricted accounts, **unknown** parts (Replex has never classified from metadata/playback) are always blocked. Restricted accounts' part and transcode-session streams are always proxied through Replex, so the client never receives the Plex origin URL.
+* Fully unrestricted accounts, meaning no resolution or bitrate cap, follow `REPLEX_REDIRECT_STREAMS` exactly: `true` redirects stream bytes to the Plex origin, while `false` proxies them through Replex. Identity fail-open uses the same configured transport mode rather than implicitly enabling redirects.
 
 Requirements and limitations:
 
@@ -235,7 +240,7 @@ Note: SSL is highly suggested, some clients default to not allowing insecure con
 
 ## Reverse proxy
 
-There should be no need for this but if you have a reverse proxy running and dont want to proxy streaming through plex then you can route the following paths and it subpaths directly to plex.
+Do not bypass Replex for stream paths when per-account resolution or bitrate policies are enabled. Sending these routes directly to Plex skips Replex's direct-part classification and restricted-stream proxy enforcement. Only route them around Replex when the resolution policy feature is disabled and you explicitly accept direct Plex-origin access.
 
 - /video/:/transcode/universal/session
 - /library/parts
@@ -243,7 +248,9 @@ There should be no need for this but if you have a reverse proxy running and don
 ## Redirect streams
 
 If you have for example an appbox it might not be ideal to stream media through replex. As that will take a lot of network resources.
-You can redirect streams by enabling `REPLEX_REDIRECT_STREAMS` and optionally set `REPLEX_REDIRECT_STREAMS_HOST` if it needs to be different from REPLEX_HOST
+You can redirect fully unrestricted streams by enabling `REPLEX_REDIRECT_STREAMS` and optionally set `REPLEX_REDIRECT_STREAMS_HOST` if it needs to be different from REPLEX_HOST. Accounts with a resolution or bitrate restriction never redirect because doing so would expose a direct path around the policy.
+
+The transport matrix is: restricted account -> proxy; unrestricted account with redirects enabled -> redirect; unrestricted account with redirects disabled -> proxy. When identity fail-open is enabled and identity resolution fails, Replex removes the restriction decision but still follows the configured redirect setting.
 
 Note: Plex doesnt handle redirects wel, and will not remeber it. So every chuck of a stream will first hit replex and then gets redirected to actuall download that chuck from the redirect url. So a bit wastefull
 

@@ -3,15 +3,23 @@ extern crate tracing;
 
 use replex::config::Config;
 use replex::routes::*;
+use replex::state::AppState;
 use salvo::prelude::*;
 use std::env;
+use std::sync::Arc;
 //use tonic::metadata::MetadataMap;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::prelude::*;
 
 #[tokio::main]
 async fn main() {
-    let config: Config = Config::figment().extract().unwrap();
+    let config: Config = match Config::figment().extract() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("invalid Replex configuration: {error}");
+            return;
+        }
+    };
 
     // set default log level
     if let Err(i) = env::var("RUST_LOG") {
@@ -56,10 +64,15 @@ async fn main() {
         .with(fmt_layer)
         .init();
 
-    if config.host.is_none() {
-        tracing::error!("REPLEX_HOST is required. Exiting");
-        return;
-    }
+    let state = match AppState::new(config) {
+        Ok(state) => Arc::new(state),
+        Err(error) => {
+            tracing::error!(error = %error, "invalid Replex startup configuration");
+            return;
+        }
+    };
+    let config = state.config.clone();
+
     if config.token.is_none() {
         tracing::warn!(
             "REPLEX_TOKEN not defined. Hero art might not load correctly."
@@ -80,15 +93,15 @@ async fn main() {
     // dbg!(&config);
 
     replex::disk_cache::init().await;
-    replex::hub_cache::spawn_warmer();
+    replex::hub_cache::spawn_warmer(state.clone());
 
-    let router = route();
+    let router = route_with_state(state);
     if config.ssl_enable && config.ssl_domain.is_some() {
         let acceptor =
             TcpListener::new(format!("0.0.0.0:{}", config.port.unwrap_or(443)))
                 .acme()
                 .cache_path("/data/acme/letsencrypt")
-                .add_domain(config.ssl_domain.unwrap())
+                .add_domain(config.ssl_domain.clone().unwrap_or_default())
                 .bind()
                 .await;
         Server::new(acceptor)

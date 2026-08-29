@@ -90,6 +90,23 @@ async fn playback_enforcement_scenarios() {
         extra_query: &str,
         username_header: Option<&str>,
     ) -> StatusCode {
+        send_decision_with_product(
+            service,
+            token,
+            extra_query,
+            username_header,
+            None,
+        )
+        .await
+    }
+
+    async fn send_decision_with_product(
+        service: &Service,
+        token: &str,
+        extra_query: &str,
+        username_header: Option<&str>,
+        product_header: Option<&str>,
+    ) -> StatusCode {
         let url = format!(
             "http://127.0.0.1:5800/video/:/transcode/universal/decision?path=%2Flibrary%2Fmetadata%2F100&{}",
             extra_query
@@ -101,6 +118,9 @@ async fn playback_enforcement_scenarios() {
             .add_header("Accept", "application/json", true);
         if let Some(username) = username_header {
             client = client.add_header("X-Plex-Username", username, true);
+        }
+        if let Some(product) = product_header {
+            client = client.add_header("X-Plex-Product", product, true);
         }
         let mut res = client.send(service).await;
         res.status_code.unwrap_or(StatusCode::OK)
@@ -221,6 +241,34 @@ async fn playback_enforcement_scenarios() {
     assert!(
         spoofed.hits() >= 1,
         "spoofed username must not bypass the rewrite"
+    );
+
+    // Plexamp is compatibility input, not an authorisation mechanism. The
+    // restricted request must still pass through mandatory policy enforcement
+    // and have its prohibited 4K media index rewritten to the permitted 1080p
+    // version before it reaches Plex.
+    let plexamp_rewritten = mock.mock(|when, then| {
+        when.method(GET)
+            .path("/video/:/transcode/universal/decision")
+            .query_param("mediaIndex", "0")
+            .query_param("scn", "plexamp");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"MediaContainer":{}}"#);
+    });
+
+    let status = send_decision_with_product(
+        &service,
+        "jodie-token",
+        "mediaIndex=1&scn=plexamp",
+        None,
+        Some("Plexamp"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        plexamp_rewritten.hits() >= 1,
+        "Plexamp product header must not bypass resolution enforcement"
     );
 
     // --- no permitted version returns 403 ---

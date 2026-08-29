@@ -1,6 +1,8 @@
 //! Stale-while-revalidate layer for hub payloads.
 //!
-//! Hub responses (`/hubs/*`) are served from the shared raw-payload cache.
+//! Hub responses (`/hubs/*`) are served from an account-scoped raw-payload
+//! cache. Plex hub metadata is authenticated library data and must never be
+//! reused across account tokens, even when a particular row looks global.
 //! This module tracks *when* each payload was fetched and keeps it fresh:
 //!
 //! - Past `hub_stale_ttl`, a cached payload is still served immediately but
@@ -47,23 +49,6 @@ pub(crate) async fn track_fetched(cache_key: String) {
     HUB_FETCHED_AT.insert(cache_key, Instant::now()).await;
 }
 
-/// Hub payloads that Plex generates per account. These must never be served
-/// from a cache entry fetched with another account's token:
-/// - `continueWatching` / `ondeck` are derived entirely from that account's
-///   watch state.
-/// - `home` and `promoted` embed Continue Watching / On Deck rows whose
-///   *membership* is account specific; the per-user transforms can prune
-///   entries but cannot rebuild another account's rows.
-/// Everything else (e.g. `/hubs/sections/<id>` discovery rows such as
-/// Recently Added) is genuinely shared and stays in the common cache.
-pub fn is_user_scoped_hub(key_path: &str) -> bool {
-    let lower = key_path.to_ascii_lowercase();
-    lower.contains("continuewatching")
-        || lower.contains("ondeck")
-        || lower.contains("/hubs/home")
-        || lower.contains("/hubs/promoted")
-}
-
 /// Short hash of a token used as the user-scope component of cache keys.
 /// Raw tokens never appear in cache keys.
 fn hub_user_scope(token: &str) -> String {
@@ -74,19 +59,17 @@ fn hub_user_scope(token: &str) -> String {
 
 /// Build the canonical hub cache key for a request path.
 ///
-/// User-scoped hubs embed a hash of the requesting token so each account
-/// reads only payloads fetched with its own credentials; all other hubs
-/// share one entry (per-user transforms still run after retrieval).
+/// Every hub embeds a hash of the requesting token so each account reads only
+/// payloads fetched with its own credentials. `/hubs/sections/<id>` is also
+/// authenticated library metadata: Plex library sharing can differ by account,
+/// so treating section discovery rows as global would let one account prime a
+/// payload another account is not authorised to retrieve from Plex.
 /// The warmer must build keys through this same function so warmed entries
 /// land where the matching requests look them up.
 pub fn hub_cache_key(key_path: &str, token: Option<&str>) -> String {
-    if is_user_scoped_hub(key_path) {
-        match token {
-            Some(t) => format!("hubcache:u:{}:{}", hub_user_scope(t), key_path),
-            None => format!("hubcache:u:anon:{key_path}"),
-        }
-    } else {
-        format!("hubcache:{key_path}")
+    match token {
+        Some(t) => format!("hubcache:u:{}:{}", hub_user_scope(t), key_path),
+        None => format!("hubcache:u:anon:{key_path}"),
     }
 }
 
@@ -356,14 +339,14 @@ async fn warm_cycle() {
         tracing::debug!("warmer idle: no tokens configured");
         return;
     }
-    // Section listing is token independent; resolve the canonical hub paths
-    // once with the first configured token.
-    let paths = warm_paths(&host, &tokens[0]).await;
     for token in &tokens {
         tracing::debug!(
-            scope = %token.chars().take(4).collect::<String>(),
+            scope = %hub_user_scope(token),
             "warmer cycle for account scope"
         );
+        // Library sharing is account-specific, so discover the hub paths with
+        // the same token whose cache namespace is about to be warmed.
+        let paths = warm_paths(&host, token).await;
         let context = crate::models::PlexContext {
             token: Some(token.clone()),
             client_identifier: Some("replex-warmer".to_string()),
@@ -382,9 +365,8 @@ async fn warm_cycle() {
 }
 
 /// Warm the hub payloads (and their poster thumbs) for a single account scope.
-/// The cache key embeds a hash of `token` so user-scoped hubs (Continue
-/// Watching, On Deck, home, promoted) land in the scope that account's own
-/// requests look up.
+/// The cache key embeds a hash of `token` so every authenticated hub lands in
+/// the scope that account's own requests look up.
 async fn warm_hubs_for_token(
     client: &PlexClient,
     paths: &[String],
@@ -403,8 +385,8 @@ async fn warm_hubs_for_token(
         };
         // Compute the cache key with the exact same logic client requests
         // go through, so warmer entries land where lookups land. Passing the
-        // account token keeps user-scoped hubs consistent with that account's
-        // requests.
+        // account token keeps all authenticated hubs consistent with that
+        // account's requests.
         let cache_key = {
             let mut probe = salvo::http::Request::default();
             let uri: hyper::Uri = fetch_path.parse().expect("valid warm path");
@@ -436,9 +418,9 @@ async fn warm_hubs_for_token(
         inflight.remove(&cache_key);
     }
 
-    // Poster prefetch: pre-transcode thumbs from the warmed rows so a
-    // user's FIRST view of home is fully warm too. The photo cache is
-    // shared across users; skip anything already cached.
+    // Poster prefetch: pre-transcode thumbs from the warmed rows so a user's
+    // FIRST view of home is fully warm too. Artwork is authenticated Plex
+    // library data, so it is cached in the same account token scope.
     const POSTERS_PER_ROW: usize = 12;
     const POSTER_BUDGET: usize = 400;
     let mut budget = POSTER_BUDGET;
@@ -457,9 +439,10 @@ async fn warm_hubs_for_token(
                     Some(q) => q,
                     None => continue,
                 };
-                let key = crate::routes::canonical_photo_key(&format!(
-                    "/photo/:/transcode?{tq}"
-                ));
+                let key = crate::routes::photo_cache_key_for(
+                    &format!("/photo/:/transcode?{tq}"),
+                    Some(token),
+                );
                 if PHOTO_CACHE.get(&key).await.is_some() {
                     continue;
                 }
@@ -636,24 +619,15 @@ mod tests {
     use crate::plex_client::PlexClient;
 
     #[test]
-    fn user_scoped_hub_classification() {
-        // Account-specific payloads must be user scoped.
-        assert!(is_user_scoped_hub("/hubs/continueWatching"));
-        assert!(is_user_scoped_hub(
-            "/hubs/continueWatching?contentdirectoryid=1,2"
-        ));
-        assert!(is_user_scoped_hub("/hubs/onDeck"));
-        assert!(is_user_scoped_hub("/hubs/home"));
-        assert!(is_user_scoped_hub("/hubs/promoted?contentdirectoryid=23"));
-        // Library discovery rows are genuinely shared.
-        assert!(!is_user_scoped_hub("/hubs/sections/6"));
-        assert!(!is_user_scoped_hub("/library/sections/6/all"));
-    }
-
-    #[test]
-    fn user_scoped_hubs_get_per_token_keys() {
-        let global = hub_cache_key("/hubs/sections/6", Some("tokenA"));
-        assert_eq!(global, "hubcache:/hubs/sections/6");
+    fn all_authenticated_hubs_get_per_token_keys() {
+        let section_a = hub_cache_key("/hubs/sections/6", Some("tokenA"));
+        let section_b = hub_cache_key("/hubs/sections/6", Some("tokenB"));
+        assert_ne!(
+            section_a, section_b,
+            "section discovery metadata is authenticated and must be account scoped"
+        );
+        assert!(section_a.starts_with("hubcache:u:"));
+        assert!(!section_a.contains("tokenA"));
 
         let a1 = hub_cache_key("/hubs/continueWatching", Some("tokenA"));
         let a2 = hub_cache_key("/hubs/continueWatching", Some("tokenA"));

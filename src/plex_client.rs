@@ -1,11 +1,14 @@
-use std::time::Duration;
-
+use crate::auth::RequestSecurityContext;
 use crate::config::Config;
 use crate::models::*;
-use crate::resolution_policy::UserIdentity;
+use crate::resolution_policy::{
+    IdentitySource, ResolvedIdentity, UserIdentity,
+};
+use crate::state::AppState;
 use crate::utils::*;
 use anyhow::Result;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::cache::GLOBAL_CACHE;
 use async_recursion::async_recursion;
@@ -21,7 +24,6 @@ use http::Uri;
 // use hyper::Body;
 use moka::future::Cache;
 //use moka::future::ConcurrentCacheExt;
-use once_cell::sync::Lazy;
 use reqwest::header;
 use reqwest::header::ACCEPT;
 use reqwest_retry::{default_on_request_failure, Retryable, RetryableStrategy};
@@ -29,84 +31,42 @@ use salvo::Error;
 use salvo::Request;
 // use hyper::client::HttpConnector;
 
-static CACHE: Lazy<Cache<String, MediaContainerWrapper<MediaContainer>>> =
-    Lazy::new(|| {
-        let c: Config = Config::figment().extract().unwrap();
-        Cache::builder()
-            .max_capacity(10000)
-            .time_to_live(Duration::from_secs(c.cache_ttl))
-            .eviction_listener(|key, value, cause| {
-                //println!("Evicted ({key:?},{value:?}) because {cause:?}")
-            })
-            .build()
-    });
-
-/// Verified Plex account identities keyed by token hash. Tokens themselves
-/// are never stored or logged.
-static IDENTITY_CACHE: Lazy<Cache<String, UserIdentity>> = Lazy::new(|| {
-    let c: Config = Config::figment().extract().unwrap();
-    Cache::builder()
-        .max_capacity(1000)
-        .time_to_live(Duration::from_secs(c.identity_cache_ttl))
-        .build()
-});
-
-/// Media part permission decisions, keyed by
-/// `(verified user uuid, policy fingerprint, part id)`.
-///
-/// The decision "is this part permitted" is a pure function of the
-/// requesting account's policy and the part's media version, so the key
-/// MUST capture both. Keying by part id alone would let one account's
-/// permission decision (e.g. a 4K-permitted account priming a 4K part)
-/// authorise a different account that is restricted to 1080p.
-pub type PartPolicyKey = (String, String, i64);
-
-pub static PART_POLICY_CACHE: Lazy<Cache<PartPolicyKey, bool>> =
-    Lazy::new(|| {
-        let c: Config = Config::figment().extract().unwrap();
-        Cache::builder()
-            .max_capacity(100_000)
-            .time_to_live(Duration::from_secs(c.identity_cache_ttl))
-            .build()
-    });
-
-/// Stable fingerprint of every policy input that `media_allowed` consults.
-/// Keep this in sync with `media_allowed`: if it ever reads more policy
-/// fields, they must be folded in here.
-pub fn part_policy_fingerprint(
-    policy: &crate::resolution_policy::ResolutionPolicy,
-) -> String {
-    format!("{:?}", policy.limit)
+/// Immutable media classification associated with a Plex part. This is a
+/// fact about the source file, not an authorisation result. The requesting
+/// account's current policy is applied later when the part is requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartMediaClassification {
+    pub resolution: Option<crate::resolution_policy::ResolutionLimit>,
+    pub bitrate: Option<i64>,
 }
 
-/// Build the cache key for one part-permission decision.
-pub fn part_policy_key(
-    user_uuid: &str,
+/// Evaluate a cached part fact against the policy in force for this request.
+/// Unknown resolution remains fail-closed when a resolution limit applies,
+/// matching `media_allowed`. Unknown bitrate is likewise fail-closed when a
+/// bitrate cap applies because an original direct part cannot be transcoded
+/// down to the requested cap by this handler.
+pub fn part_classification_allowed(
+    classification: PartMediaClassification,
     policy: &crate::resolution_policy::ResolutionPolicy,
-    part_id: i64,
-) -> PartPolicyKey {
-    (
-        user_uuid.to_string(),
-        part_policy_fingerprint(policy),
-        part_id,
-    )
-}
-
-/// Record the permitted/blocked status of every part of every media version,
-/// scoped to the verified account and its current policy.
-pub async fn cache_part_policy(
-    media: &[Media],
-    policy: &crate::resolution_policy::ResolutionPolicy,
-    user_uuid: &str,
-) {
-    for m in media {
-        let allowed = crate::resolution_policy::media_allowed(m, policy);
-        for part in &m.parts {
-            PART_POLICY_CACHE
-                .insert(part_policy_key(user_uuid, policy, part.id), allowed)
-                .await;
+) -> bool {
+    if !policy.is_unrestricted() {
+        let resolution_allowed = classification
+            .resolution
+            .map(|resolution| resolution <= policy.limit)
+            .unwrap_or(false);
+        if !resolution_allowed {
+            return false;
         }
     }
+
+    if let Some(max_bitrate) = policy.max_bitrate {
+        return classification
+            .bitrate
+            .map(|bitrate| bitrate <= max_bitrate)
+            .unwrap_or(false);
+    }
+
+    true
 }
 
 /// Errors raised while resolving the authenticated Plex account.
@@ -130,12 +90,6 @@ fn hash_token(token: &str) -> String {
     data_encoding::HEXLOWER.encode(&digest)
 }
 
-/// Cached machineIdentifier of the upstream Plex server, keyed by upstream
-/// host, used to recognise which resource entry in a shared user's
-/// plex.tv resources list is ours.
-static SERVER_MACHINE_IDS: Lazy<Cache<String, String>> =
-    Lazy::new(|| Cache::builder().max_capacity(10).build());
-
 struct Retry401;
 impl RetryableStrategy for Retry401 {
     fn handle(
@@ -157,13 +111,35 @@ impl RetryableStrategy for Retry401 {
 #[derive(Debug, Clone)]
 pub struct PlexClient {
     pub http_client: reqwest_middleware::ClientWithMiddleware,
+    pub identity_http: reqwest::Client,
+    pub config: Arc<Config>,
     pub context: PlexContext,
     pub host: String, // TODO: Dont think this supposed to be here. Should be higher up
     pub cache: Cache<String, MediaContainerWrapper<MediaContainer>>,
+    pub identity_cache: Cache<String, ResolvedIdentity>,
+    pub part_media_cache: Cache<i64, PartMediaClassification>,
+    pub server_machine_ids: Cache<String, String>,
+    pub security_context: Option<Arc<RequestSecurityContext>>,
+    pub security_unavailable_fail_closed: Option<bool>,
     pub default_headers: header::HeaderMap,
 }
 
 impl PlexClient {
+    /// Record immutable resolution and source-bitrate facts for every known
+    /// media part.  The cache is process scoped through `AppState`, while the
+    /// authorisation decision is always made against the current request.
+    pub async fn cache_part_classification(&self, media: &[Media]) {
+        for m in media {
+            let classification = PartMediaClassification {
+                resolution: crate::resolution_policy::classify(m),
+                bitrate: m.bitrate,
+            };
+            for part in &m.parts {
+                self.part_media_cache.insert(part.id, classification).await;
+            }
+        }
+    }
+
     // TODO: Handle 404s/500 etc
     // TODO: Map reqwest response and error to salvo
     pub async fn get(&self, path: String) -> Result<reqwest::Response, Error> {
@@ -290,7 +266,6 @@ impl PlexClient {
         limit: i32,
         original_limit: i32,
     ) -> anyhow::Result<MediaContainerWrapper<MediaContainer>> {
-        let config: Config = Config::figment().extract().unwrap();
         let mut c = self
             .get_collection_children(id, Some(offset), Some(limit))
             .await?;
@@ -372,15 +347,25 @@ impl PlexClient {
         Ok(container)
     }
 
-    /// Resolve the authenticated Plex account for this client's request token.
+    /// Resolve the account identity for this client's request token.
     ///
-    /// The token is verified against plex.tv; the resulting identity is the
-    /// only trusted basis for per-user policies. Results are cached by token
-    /// hash for `identity_cache_ttl` seconds. Authentication failures evict
-    /// any cached identity immediately.
+    /// Plex verification and Plex-backed shared-token resolution are tried
+    /// first. Administrator token-fingerprint bindings are the preferred
+    /// fallback for opaque tokens, followed by explicitly configured legacy
+    /// client-identifier and username compatibility modes. Results are cached
+    /// by token hash for `identity_cache_ttl` seconds.
     pub async fn get_current_user(
         &self,
     ) -> Result<UserIdentity, IdentityError> {
+        Ok(self.get_current_identity().await?.identity)
+    }
+
+    /// Resolve the account together with the trust source that established
+    /// it.  This is the canonical identity operation used by request security
+    /// context creation; legacy callers can continue using `get_current_user`.
+    pub async fn get_current_identity(
+        &self,
+    ) -> Result<ResolvedIdentity, IdentityError> {
         let token = self
             .context
             .token
@@ -389,33 +374,37 @@ impl PlexClient {
 
         let cache_key = hash_token(&token);
 
-        if let Some(identity) = IDENTITY_CACHE.get(&cache_key).await {
+        if let Some(resolved) = self.identity_cache.get(&cache_key).await {
             tracing::debug!(
-                username = %identity.username,
-                uuid = %identity.uuid,
+                username = %resolved.identity.username,
+                uuid = %resolved.identity.uuid,
+                identity_source = resolved.source.as_str(),
                 "Resolution identity resolved (cached)"
             );
-            return Ok(identity);
+            return Ok(resolved);
         }
 
-        let identity = self.fetch_current_user(&token).await?;
+        let resolved = self.fetch_current_identity(&token).await?;
 
         tracing::info!(
-            username = %identity.username,
-            uuid = %identity.uuid,
+            username = %resolved.identity.username,
+            uuid = %resolved.identity.uuid,
+            identity_source = resolved.source.as_str(),
             "Resolution identity resolved"
         );
 
-        IDENTITY_CACHE.insert(cache_key, identity.clone()).await;
+        self.identity_cache
+            .insert(cache_key, resolved.clone())
+            .await;
 
-        Ok(identity)
+        Ok(resolved)
     }
 
-    async fn fetch_current_user(
+    async fn fetch_current_identity(
         &self,
         token: &str,
-    ) -> Result<UserIdentity, IdentityError> {
-        let config: Config = Config::figment().extract().unwrap();
+    ) -> Result<ResolvedIdentity, IdentityError> {
+        let config = &self.config;
         let base = config.identity_api_base();
         let url = format!("{}/api/v2/user", base);
 
@@ -438,7 +427,7 @@ impl PlexClient {
         );
 
         let res = self
-            .http_client
+            .identity_http
             .get(url)
             .headers(headers)
             .send()
@@ -464,20 +453,88 @@ impl PlexClient {
                 // endpoint instead, which reveals which shared user the
                 // token belongs to.
                 if let Some(identity) = self.resolve_shared_user(token).await? {
-                    return Ok(identity);
+                    return Ok(ResolvedIdentity {
+                        identity,
+                        source: IdentitySource::SharedResource,
+                    });
                 }
                 // plex.tv rejects some device-scoped shared tokens outright;
                 // match the token against the admin's shared-server list.
                 if let Some(identity) =
                     self.resolve_via_shared_servers(token).await?
                 {
-                    return Ok(identity);
+                    return Ok(ResolvedIdentity {
+                        identity,
+                        source: IdentitySource::SharedServer,
+                    });
+                }
+                let config = &self.config;
+
+                // Some clients use PMS/device scoped tokens that Plex's
+                // account APIs cannot identify. Bind those tokens by their
+                // administrator configured SHA256 fingerprint. The raw token
+                // never enters configuration, logs, cache keys or the
+                // resulting identity.
+                let fingerprint = hash_token(token);
+                if let Some(binding) =
+                    config.token_identity_map.get(&fingerprint)
+                {
+                    if let Some(required_client_id) =
+                        binding.client_identifier()
+                    {
+                        if self.context.client_identifier.as_deref()
+                            != Some(required_client_id)
+                        {
+                            tracing::warn!(
+                                username = %binding.username(),
+                                "Token fingerprint identity binding rejected because client identifier did not match"
+                            );
+                            return Err(IdentityError::InvalidToken);
+                        }
+                    }
+
+                    let username = binding.username().to_string();
+                    tracing::warn!(
+                        username = %username,
+                        "Identity resolved via administrator token fingerprint binding"
+                    );
+                    return Ok(ResolvedIdentity {
+                        identity: UserIdentity {
+                            id: 0,
+                            uuid: format!("token-sha256-{fingerprint}"),
+                            username,
+                        },
+                        source: IdentitySource::TokenFingerprint,
+                    });
+                }
+
+                // Legacy migration fallback only. A client identifier is
+                // supplied by the caller, so possession of the configured
+                // identifier is not proof of account identity. Keep this
+                // below every token based mechanism and above only the even
+                // weaker optional username-header fallback.
+                if let Some(cid) = &self.context.client_identifier {
+                    if let Some(username) = config.client_identity_map.get(cid)
+                    {
+                        tracing::warn!(
+                            username = %username,
+                            client_id = %cid,
+                            "Identity resolved via legacy client identity map"
+                        );
+                        return Ok(ResolvedIdentity {
+                            identity: UserIdentity {
+                                id: 0,
+                                uuid: format!("cid-{cid}"),
+                                username: username.clone(),
+                            },
+                            source: IdentitySource::LegacyClientIdentifier,
+                        });
+                    }
                 }
                 // Last resort for clients whose tokens are opaque to
                 // plex.tv (e.g. preview apps using PMS-scoped session
                 // tokens): trust the X-Plex-Username header. Opt-in only,
                 // because it is spoofable by anyone with server access.
-                let config: Config = Config::figment().extract().unwrap();
                 if config.allow_username_fallback {
                     if let Some(username) =
                         self.context.username.clone().filter(|u| !u.is_empty())
@@ -486,30 +543,13 @@ impl PlexClient {
                             username = %username,
                             "Identity resolved via unverified username header (allow_username_fallback)"
                         );
-                        return Ok(UserIdentity {
-                            id: 0,
-                            uuid: format!("unverified-{username}"),
-                            username,
-                        });
-                    }
-                }
-                // Deterministic per-device binding: some TV clients use
-                // PMS-scoped session tokens invisible to every plex.tv
-                // endpoint. An admin-configured clientIdentifier -> username
-                // map is the only reliable identity source for them.
-                let config: Config = Config::figment().extract().unwrap();
-                if let Some(cid) = &self.context.client_identifier {
-                    if let Some(username) = config.client_identity_map.get(cid)
-                    {
-                        tracing::warn!(
-                            username = %username,
-                            client_id = %cid,
-                            "Identity resolved via client identity map"
-                        );
-                        return Ok(UserIdentity {
-                            id: 0,
-                            uuid: format!("cid-{cid}"),
-                            username: username.clone(),
+                        return Ok(ResolvedIdentity {
+                            identity: UserIdentity {
+                                id: 0,
+                                uuid: format!("unverified-{username}"),
+                                username,
+                            },
+                            source: IdentitySource::UsernameFallback,
                         });
                     }
                 }
@@ -543,10 +583,13 @@ impl PlexClient {
             .or(raw.title)
             .unwrap_or_else(|| format!("user-{}", raw.uuid));
 
-        Ok(UserIdentity {
-            id: raw.id,
-            uuid: raw.uuid,
-            username,
+        Ok(ResolvedIdentity {
+            identity: UserIdentity {
+                id: raw.id,
+                uuid: raw.uuid,
+                username,
+            },
+            source: IdentitySource::VerifiedPlex,
         })
     }
 
@@ -562,10 +605,7 @@ impl PlexClient {
     ) -> Result<Option<UserIdentity>, IdentityError> {
         let machine_id = self.server_machine_id().await?;
 
-        let base = Config::figment()
-            .extract::<Config>()
-            .map(|c| c.identity_api_base())
-            .unwrap_or_else(|_| "https://plex.tv".to_string());
+        let base = self.config.identity_api_base();
         let url =
             format!("{base}/api/v2/resources?includeHttps=1&includeRelay=0");
         let mut headers = header::HeaderMap::new();
@@ -588,7 +628,7 @@ impl PlexClient {
 
         tracing::debug!(url = %url, "Shared-token resources lookup");
         let res = self
-            .http_client
+            .identity_http
             .get(url)
             .headers(headers)
             .send()
@@ -692,7 +732,7 @@ impl PlexClient {
         &self,
         token: &str,
     ) -> Result<Option<UserIdentity>, IdentityError> {
-        let config: Config = Config::figment().extract().unwrap();
+        let config = &self.config;
         let Some(admin_token) = config.token.clone() else {
             tracing::debug!(
                 "shared-servers lookup skipped: no admin token configured"
@@ -704,7 +744,7 @@ impl PlexClient {
         let base = config.identity_api_base();
         let url = format!("{base}/api/servers/{machine_id}/shared_servers");
         let res = self
-            .http_client
+            .identity_http
             .get(&url)
             .header("X-Plex-Token", admin_token)
             .header("X-Plex-Client-Identifier", self.client_identifier_header())
@@ -792,7 +832,7 @@ impl PlexClient {
     }
 
     async fn server_machine_id(&self) -> Result<String, IdentityError> {
-        if let Some(id) = SERVER_MACHINE_IDS.get(&self.host).await {
+        if let Some(id) = self.server_machine_ids.get(&self.host).await {
             return Ok(id);
         }
 
@@ -838,7 +878,7 @@ impl PlexClient {
         })?;
 
         let id = root.container.machine_identifier;
-        SERVER_MACHINE_IDS
+        self.server_machine_ids
             .insert(self.host.clone(), id.clone())
             .await;
         Ok(id)
@@ -917,7 +957,7 @@ impl PlexClient {
         self,
         uuid: &String,
     ) -> Result<MediaContainerWrapper<MediaContainer>> {
-        let config: Config = Config::figment().extract().unwrap();
+        let config = &self.config;
         let url = format!(
             "https://discover.provider.plex.tv/library/metadata/{}",
             uuid
@@ -982,10 +1022,14 @@ impl PlexClient {
         )
     }
 
-    pub fn from_context(context: &PlexContext) -> Result<Self, anyhow::Error> {
-        let config: Config = Config::figment().extract().map_err(|e| {
-            anyhow::anyhow!("invalid replex configuration: {e}")
-        })?;
+    /// Construct a request wrapper from already-created shared application
+    /// dependencies. Production request paths should use this constructor so
+    /// no HTTP client or environment configuration is rebuilt per request.
+    pub fn from_context_with_state(
+        context: &PlexContext,
+        state: &AppState,
+    ) -> Result<Self, anyhow::Error> {
+        let config = state.config.clone();
         let token = context
             .token
             .clone()
@@ -993,7 +1037,6 @@ impl PlexClient {
         let client_identifier = context.client_identifier.clone();
         let platform = context.platform.clone().unwrap_or_default();
 
-        //let req_headers = req.headers().clone();
         let mut headers = header::HeaderMap::new();
         let headers_map = HashMap::from([
             ("X-Plex-Token", context.token.clone()),
@@ -1031,7 +1074,6 @@ impl PlexClient {
             ("X-Real-Ip", context.real_ip.clone()),
             (&ACCEPT.as_str(), Some("application/json".to_string())),
             (&ACCEPT_LANGUAGE.as_str(), Some("en-US".to_string())),
-            //(http::header::HOST.as_str(), Some(config.host.clone().unwrap())),
         ]);
 
         for (key, val) in headers_map {
@@ -1042,40 +1084,32 @@ impl PlexClient {
             }
         }
 
-        //let target_uri: url::Url = url::Url::parse(config.host.clone().unwrap().as_str()).unwrap();
-        //let target_host = target_uri.host().unwrap().to_string().clone();
-
-        //headers.insert(
-        //    http::header::HOST,
-        //    header::HeaderValue::from_str(&target_host).unwrap(),
-        //);
-
-        let http_client = reqwest_middleware::ClientBuilder::new(
-            reqwest::Client::builder()
-                //.default_headers(headers)
-                .gzip(true)
-                // Large libraries can exceed 30s on section queries;
-                // the outer request timeout is 200s so stay under it.
-                .timeout(Duration::from_secs(120))
-                .build()
-                .map_err(|e| {
-                    anyhow::anyhow!("failed to build http client: {e}")
-                })?,
-        )
-        .build();
-
         Ok(Self {
-            http_client,
+            http_client: state.plex_http.clone(),
+            identity_http: state.identity_http.clone(),
+            config: config.clone(),
             default_headers: headers,
-            host: config.host.ok_or_else(|| {
+            host: config.host.clone().ok_or_else(|| {
                 anyhow::anyhow!("REPLEX_HOST is not configured")
             })?,
             context: context.clone(),
-            //x_plex_token: token,
-            //x_plex_client_identifier: client_identifier,
-            //x_plex_platform: platform,
-            cache: CACHE.clone(),
+            cache: state.metadata_cache.clone(),
+            identity_cache: state.identity_cache.clone(),
+            part_media_cache: state.part_media_cache.clone(),
+            server_machine_ids: state.server_machine_ids.clone(),
+            security_context: None,
+            security_unavailable_fail_closed: None,
         })
+    }
+
+    /// Compatibility constructor for unit tests and external library callers.
+    /// Request handlers use `from_context_with_state` instead.
+    pub fn from_context(context: &PlexContext) -> Result<Self, anyhow::Error> {
+        let config: Config = Config::figment().extract().map_err(|e| {
+            anyhow::anyhow!("invalid replex configuration: {e}")
+        })?;
+        let state = AppState::new(config)?;
+        Self::from_context_with_state(context, &state)
     }
 
     // pub fn dummy() -> Self {
@@ -1136,7 +1170,7 @@ impl PlexClient {
 // }
 
 #[cfg(test)]
-mod part_policy_cache_tests {
+mod part_media_cache_tests {
     use super::*;
     use crate::resolution_policy::{ResolutionLimit, ResolutionPolicy};
 
@@ -1148,46 +1182,61 @@ mod part_policy_cache_tests {
         }
     }
 
-    /// Regression test for the cross-user part policy cache bug: the cache
-    /// key must capture the verified user and the policy, so a 4K-permitted
-    /// account priming a part can never authorise a 1080p-restricted account.
     #[test]
-    fn keys_differ_across_users_and_policies() {
+    fn one_classification_is_re_evaluated_against_each_policy() {
         let p1080 = policy(ResolutionLimit::P1080);
         let p4k = policy(ResolutionLimit::P2160);
+        let classification = PartMediaClassification {
+            resolution: Some(ResolutionLimit::P2160),
+            bitrate: Some(20_000),
+        };
 
-        let user_a_1080 = part_policy_key("uuid-a", &p1080, 123);
-        let user_b_1080 = part_policy_key("uuid-b", &p1080, 123);
-        let user_a_4k = part_policy_key("uuid-a", &p4k, 123);
-
-        assert_ne!(
-            user_a_1080, user_b_1080,
-            "same part, different accounts must not share decisions"
-        );
-        assert_ne!(
-            user_a_1080, user_a_4k,
-            "same account, changed policy must not reuse old decisions"
-        );
-        assert_eq!(
-            user_a_1080,
-            part_policy_key("uuid-a", &p1080, 123),
-            "same user + policy must hit the same entry"
-        );
+        assert!(!part_classification_allowed(classification, &p1080));
+        assert!(part_classification_allowed(classification, &p4k));
+        assert!(part_classification_allowed(
+            classification,
+            &policy(ResolutionLimit::Unlimited)
+        ));
     }
 
     #[test]
-    fn fingerprint_tracks_the_limit() {
-        assert_eq!(
-            part_policy_fingerprint(&policy(ResolutionLimit::P1080)),
-            part_policy_fingerprint(&policy(ResolutionLimit::P1080))
-        );
-        assert_ne!(
-            part_policy_fingerprint(&policy(ResolutionLimit::P1080)),
-            part_policy_fingerprint(&policy(ResolutionLimit::P2160))
-        );
-        assert_ne!(
-            part_policy_fingerprint(&policy(ResolutionLimit::P1080)),
-            part_policy_fingerprint(&policy(ResolutionLimit::Unlimited))
-        );
+    fn unknown_classification_is_blocked_only_for_restricted_policy() {
+        let unknown = PartMediaClassification {
+            resolution: None,
+            bitrate: None,
+        };
+        assert!(!part_classification_allowed(
+            unknown,
+            &policy(ResolutionLimit::P1080)
+        ));
+        assert!(part_classification_allowed(
+            unknown,
+            &policy(ResolutionLimit::Unlimited)
+        ));
+    }
+
+    #[test]
+    fn bitrate_cap_is_applied_to_cached_part_facts() {
+        let capped = ResolutionPolicy {
+            limit: ResolutionLimit::Unlimited,
+            max_bitrate: Some(8_000),
+            hidden_collections: vec![],
+        };
+        let under_cap = PartMediaClassification {
+            resolution: Some(ResolutionLimit::P2160),
+            bitrate: Some(5_000),
+        };
+        let over_cap = PartMediaClassification {
+            resolution: Some(ResolutionLimit::P1080),
+            bitrate: Some(20_000),
+        };
+        let unknown_bitrate = PartMediaClassification {
+            resolution: Some(ResolutionLimit::P1080),
+            bitrate: None,
+        };
+
+        assert!(part_classification_allowed(under_cap, &capped));
+        assert!(!part_classification_allowed(over_cap, &capped));
+        assert!(!part_classification_allowed(unknown_bitrate, &capped));
     }
 }

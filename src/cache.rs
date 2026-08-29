@@ -17,13 +17,12 @@ use serde::Serialize;
 use std::borrow::Borrow;
 use std::error::Error as StdError;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
 // use bincode::{config, Decode, Encode};
-
-use crate::config::Config;
 
 // we close, this is a good example: https://github.com/getsentry/symbolicator/blob/170062d5bc7d4638a3e6af8a564cd881d798f1f0/crates/symbolicator-service/src/caching/memory.rs#L85
 
@@ -57,13 +56,20 @@ pub enum Expiration {
     Day,
 }
 
+static GLOBAL_CACHE_TTL_SECONDS: AtomicU64 = AtomicU64::new(60 * 60);
+
+pub fn configure_global_cache_ttl(seconds: u64) {
+    GLOBAL_CACHE_TTL_SECONDS.store(seconds, Ordering::Relaxed);
+}
+
 impl Expiration {
     /// Returns the duration of this expiration.
     pub fn as_duration(&self) -> Option<Duration> {
-        let config: Config = Config::figment().extract().unwrap();
         match self {
             Expiration::Never => None,
-            Expiration::Global => Some(Duration::from_secs(config.cache_ttl)),
+            Expiration::Global => Some(Duration::from_secs(
+                GLOBAL_CACHE_TTL_SECONDS.load(Ordering::Relaxed),
+            )),
             Expiration::Month => Some(Duration::from_secs(30 * 24 * 60 * 60)),
             Expiration::Day => Some(Duration::from_secs(60 * 60 * 24)),
         }
@@ -119,10 +125,18 @@ impl CacheManager {
         T: DeserializeOwned,
     {
         match self.inner.get(cache_key).await {
-            Some(d) => {
-                let result: T = bincode::deserialize(&d.1).unwrap();
-                Some(result)
-            }
+            Some(d) => match bincode::deserialize(&d.1) {
+                Ok(result) => Some(result),
+                Err(error) => {
+                    tracing::warn!(
+                        cache_key = %cache_key,
+                        error = %error,
+                        "Invalid cached value; evicting entry"
+                    );
+                    self.inner.invalidate(cache_key).await;
+                    None
+                }
+            },
             None => None,
         }
     }

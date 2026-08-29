@@ -1,7 +1,7 @@
 use super::hero_meta;
 use super::MediaStyleTransform;
 use super::Transform;
-use crate::{config::Config, models::*, plex_client::PlexClient};
+use crate::{models::*, plex_client::PlexClient};
 use async_trait::async_trait;
 use futures_util::{stream::FuturesOrdered, StreamExt};
 
@@ -191,7 +191,6 @@ impl Transform for HubStyleTransform {
         plex_client: PlexClient,
         options: PlexContext,
     ) {
-        let config: Config = Config::figment().extract().unwrap();
         let style = item.style.clone().unwrap_or("".to_string()).to_owned();
 
         if item.is_hub() {

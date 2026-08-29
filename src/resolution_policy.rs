@@ -108,15 +108,50 @@ where
     Ok(out)
 }
 
-/// Verified Plex account identity.
+/// Account identity resolved for a request.
 ///
-/// Always resolved from the request's own token via the Plex API; never from
-/// client-supplied username headers.
+/// Plex-verified and shared-token identities are preferred. For opaque
+/// PMS/device-scoped tokens, administrators may explicitly bind the token's
+/// SHA256 fingerprint to an account. Legacy client-identifier and username
+/// fallbacks can also be enabled for migration and compatibility, but are
+/// weaker because those fields are supplied by the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserIdentity {
     pub id: i64,
     pub uuid: String,
     pub username: String,
+}
+
+/// Trust source used to establish an account identity.  Keeping this alongside
+/// the identity makes the request security decision auditable without ever
+/// logging the raw Plex token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentitySource {
+    VerifiedPlex,
+    SharedResource,
+    SharedServer,
+    TokenFingerprint,
+    LegacyClientIdentifier,
+    UsernameFallback,
+}
+
+impl IdentitySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::VerifiedPlex => "verified_plex",
+            Self::SharedResource => "shared_resource",
+            Self::SharedServer => "shared_server",
+            Self::TokenFingerprint => "token_fingerprint",
+            Self::LegacyClientIdentifier => "legacy_client_identifier",
+            Self::UsernameFallback => "username_fallback",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedIdentity {
+    pub identity: UserIdentity,
+    pub source: IdentitySource,
 }
 
 /// The resolved policy for a request.
@@ -144,12 +179,12 @@ impl ResolutionPolicy {
     }
 }
 
-/// Resolve the policy for a verified identity.
+/// Resolve the policy for an already resolved identity.
 ///
 /// Matching order: account uuid first (stable identifier), then username.
 /// Users with no matching entry receive the configured default. The identity
-/// must come from token verification; username headers on requests are never
-/// consulted here.
+/// resolver is responsible for applying the configured trust order before a
+/// value reaches this function.
 ///
 /// `default_hidden_collections` are hidden from everyone; accounts with a
 /// matching entry see them removed from their hidden list via

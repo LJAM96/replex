@@ -253,8 +253,16 @@ where
             if s.is_empty() {
                 return Ok(None);
             }
-            let r: Vec<i32> =
-                s.split(',').map(|s| s.parse().unwrap()).collect();
+            let r: Vec<i32> = s
+                .split(',')
+                .map(|value| {
+                    value.trim().parse::<i32>().map_err(|error| {
+                        serde::de::Error::custom(format!(
+                            "invalid integer '{value}' in comma-separated list: {error}"
+                        ))
+                    })
+                })
+                .collect::<Result<_, _>>()?;
             Ok(Some(r))
         }
         None => Ok(None),
@@ -1359,11 +1367,12 @@ impl MetaData {
         if self.style.as_deref() == Some("hero") {
             return Ok(true);
         }
-        let config: Config = Config::figment().extract().unwrap();
+        let config = &plex_client.config;
         // dbg!(&config.hero_rows);
-        if config.hero_rows.is_some() && self.hub_identifier.is_some() {
-            let id = self.hub_identifier.clone().unwrap();
-            for row in config.hero_rows.unwrap() {
+        if let (Some(rows), Some(id)) =
+            (config.hero_rows.as_ref(), self.hub_identifier.as_ref())
+        {
+            for row in rows {
                 if !row.is_empty() && id.contains(&row) {
                     return Ok(true);
                 }
@@ -1384,9 +1393,8 @@ impl MetaData {
         Ok(collection_details
             .media_container
             .children()
-            .get(0)
-            .unwrap()
-            .has_label("REPLEXHERO".to_string()))
+            .first()
+            .is_some_and(|item| item.has_label("REPLEXHERO".to_string())))
     }
 
     // view_count stays for show even when marked unwatched.
@@ -1414,7 +1422,7 @@ impl MetaData {
         &self,
         plex_client: PlexClient,
     ) -> Result<bool> {
-        let config: Config = Config::figment().extract().unwrap();
+        let config = &plex_client.config;
         if !self.is_collection_hub() {
             return Ok(config.exclude_watched);
         }
@@ -1433,9 +1441,10 @@ impl MetaData {
             || collection
                 .media_container
                 .metadata
-                .get(0)
-                .unwrap()
-                .has_label("REPLEX_EXCLUDE_WATCHED".to_string()))
+                .first()
+                .is_some_and(|metadata| {
+                    metadata.has_label("REPLEX_EXCLUDE_WATCHED".to_string())
+                }))
     }
 
     // TODO: Does not work when using a new instance
@@ -1722,17 +1731,6 @@ pub struct Meta {
 impl MediaContainer {
     pub fn is_hub(&self) -> bool {
         !self.hub.is_empty()
-    }
-
-    pub fn exclude_watched(&self) -> bool {
-        let config: Config = Config::figment().extract().unwrap();
-
-        return config.exclude_watched
-            || self
-                .metadata
-                .get(0)
-                .unwrap()
-                .has_label("REPLEX_EXCLUDE_WATCHED".to_string());
     }
 
     pub fn set_type(&mut self, value: String) {
