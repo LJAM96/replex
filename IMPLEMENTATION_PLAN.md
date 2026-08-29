@@ -750,6 +750,17 @@ After the first four security phases, deploy to a test Replex instance with at l
 
 Exercise Plex Web, iOS or Android, TV clients, direct play, direct stream, transcode, resume playback, Continue Watching, section hubs, images, and direct part requests.
 
+Run an explicit Plex Experience Preview hero compatibility matrix against
+Plex Web, Apple TV/tvOS Preview, Android TV Preview, iOS Preview, Android
+mobile Preview, and Roku Preview where available. For Continue Watching and
+custom hero collections, capture the upstream PMS payload, the transformed
+Replex payload, and the artwork actually rendered by the client. Verify that
+Replex preserves Plex-native `Image` entries such as `coverPoster`,
+`background`, `clearLogo`, and `backgroundSquare` while upserting only the
+hero `coverArt` entry. Confirm each client honours the expected
+`Meta.displayImages`/`coverArt` combination and document any platform-specific
+`thumb` or `art` fallback that remains necessary.
+
 Confirm restricted clients never receive a Plex origin redirect.
 
 Confirm unrestricted clients follow the configured redirect mode.
@@ -787,6 +798,12 @@ Transform filtering avoids owned metadata cloning and optional key unwrap assump
 Every identified bypass has an adversarial regression test.
 
 CI enforces dependency security once the existing advisory baseline is clean.
+
+Continue Watching hero transformation is covered by regression tests and does
+not discard Plex-native artwork metadata.
+
+The Plex Experience Preview compatibility matrix has been exercised for the
+supported client families before a hero-style release is declared compatible.
 
 Documentation accurately describes runtime behaviour and the network security boundary.
 

@@ -135,13 +135,13 @@ async fn direct_part_protection_scenarios() {
         if let Some(product) = product {
             client = client.add_header("X-Plex-Product", product, true);
         }
-        let mut res = client.send(service).await;
+        let res = client.send(service).await;
         res.status_code.unwrap_or(StatusCode::OK)
     }
 
     // Populate the cache through a playback decision as the restricted user.
     let decision_url = "http://127.0.0.1:5800/video/:/transcode/universal/decision?path=%2Flibrary%2Fmetadata%2F100&mediaIndex=1";
-    let mut res = TestClient::get(decision_url)
+    let res = TestClient::get(decision_url)
         .add_header("Host", "127.0.0.1:5800", true)
         .add_header("X-Plex-Token", "jodie-token", true)
         .add_header("X-Plex-Client-Identifier", "test-client", true)

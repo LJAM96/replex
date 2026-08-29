@@ -52,10 +52,8 @@ impl Transform for HubInterleaveTransform {
                         new_hubs.push(hub.to_owned());
                         continue;
                     };
-                    new_hubs[v].key = Some(merge_children_keys(
-                        left_key,
-                        right_key,
-                    ));
+                    new_hubs[v].key =
+                        Some(merge_children_keys(left_key, right_key));
                     let c = new_hubs[v].children();
                     new_hubs[v].set_children(
                         c.into_iter()

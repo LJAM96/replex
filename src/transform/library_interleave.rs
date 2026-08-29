@@ -75,13 +75,11 @@ impl Transform for LibraryInterleaveTransform {
             //}
 
             let collection_excludes_watched = config.exclude_watched
-                || collection
-                    .media_container
-                    .metadata
-                    .first()
-                    .is_some_and(|metadata| {
+                || collection.media_container.metadata.first().is_some_and(
+                    |metadata| {
                         metadata.has_label("REPLEX_EXCLUDE_WATCHED".to_string())
-                    });
+                    },
+                );
             if collection_excludes_watched {
                 c.media_container.children_mut().retain(|x| !x.is_watched());
             }

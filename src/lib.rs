@@ -9,6 +9,7 @@ pub mod auth;
 pub mod cache;
 pub mod config;
 pub mod disk_cache;
+pub mod error;
 pub mod hub_cache;
 pub mod logging;
 pub mod models;

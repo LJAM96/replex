@@ -145,7 +145,11 @@ impl PlexClient {
     pub async fn get(&self, path: String) -> Result<reqwest::Response, Error> {
         let mut req = Request::default();
         *req.method_mut() = http::Method::GET;
-        req.set_uri(Uri::builder().path_and_query(path).build().unwrap());
+        let uri = Uri::builder()
+            .path_and_query(path)
+            .build()
+            .map_err(Error::other)?;
+        req.set_uri(uri);
         self.request(&mut req).await
     }
 
@@ -153,11 +157,12 @@ impl PlexClient {
         &self,
         req: &Request,
     ) -> Result<reqwest::Response, Error> {
-        let url = format!(
-            "{}{}",
-            self.host,
-            &req.uri().clone().path_and_query().unwrap()
-        );
+        let path_and_query = req
+            .uri()
+            .path_and_query()
+            .map(|value| value.as_str())
+            .unwrap_or(req.uri().path());
+        let url = format!("{}{}", self.host, path_and_query);
         let mut headers = self.default_headers.clone();
         for (key, value) in req.headers().iter() {
             if key != ACCEPT && key != http::header::HOST {
@@ -183,12 +188,15 @@ impl PlexClient {
         &self,
         req: &Request,
     ) -> Result<reqwest::Response, Error> {
-        let url = format!(
-            "{}{}?{}",
-            self.host,
-            encode_url_path(&url_path_getter(req).unwrap()),
-            url_query_getter(req).unwrap()
+        let path = encode_url_path(
+            &url_path_getter(req).unwrap_or_else(|| "/".to_string()),
         );
+        let url = match url_query_getter(req) {
+            Some(query) if !query.is_empty() => {
+                format!("{}{}?{}", self.host, path, query)
+            }
+            _ => format!("{}{}", self.host, path),
+        };
         //dbg!(&req);
         //dbg!(&url);
         //dbg!(&req.uri().clone().query().unwrap().to_string());
@@ -213,13 +221,16 @@ impl PlexClient {
     ) -> Result<MediaContainerWrapper<MediaContainer>> {
         let res = self
             .get(format!("/library/sections/{}/collections", id))
-            .await
-            .unwrap();
+            .await?;
+        if !res.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "upstream collection request returned {}",
+                res.status()
+            ));
+        }
 
         let container: MediaContainerWrapper<MediaContainer> =
-            from_reqwest_response(res)
-                .await
-                .expect("Cannot get MediaContainerWrapper from response");
+            from_reqwest_response(res).await?;
 
         Ok(container)
     }
@@ -232,20 +243,22 @@ impl PlexClient {
     ) -> Result<MediaContainerWrapper<MediaContainer>> {
         let mut path = format!("/library/collections/{}/children", id);
 
-        if offset.is_some() {
-            path =
-                format!("{}?X-Plex-Container-Start={}", path, offset.unwrap());
+        if let Some(offset) = offset {
+            path = format!("{}?X-Plex-Container-Start={}", path, offset);
         }
 
-        if limit.is_some() {
-            path = format!("{}&X-Plex-Container-Size={}", path, limit.unwrap());
+        if let Some(limit) = limit {
+            let separator = if path.contains('?') { '&' } else { '?' };
+            path =
+                format!("{}{separator}X-Plex-Container-Size={}", path, limit);
         }
 
         // we want guids for banners
-        path = format!("{}&includeGuids=1", path);
+        let separator = if path.contains('?') { '&' } else { '?' };
+        path = format!("{}{separator}includeGuids=1", path);
         // dbg!(&path);
 
-        let res = self.get(path).await.unwrap();
+        let res = self.get(path).await?;
         if !res.status().is_success() {
             return Err(anyhow::anyhow!(format!(
                 "unexpected status code: status = {}",
@@ -254,7 +267,7 @@ impl PlexClient {
         }
 
         let container: MediaContainerWrapper<MediaContainer> =
-            from_reqwest_response(res).await.unwrap();
+            from_reqwest_response(res).await?;
         Ok(container)
     }
 
@@ -288,7 +301,7 @@ impl PlexClient {
         }
 
         let container: MediaContainerWrapper<MediaContainer> =
-            from_reqwest_response(res).await.unwrap();
+            from_reqwest_response(res).await?;
         Ok(container)
     }
 
@@ -323,7 +336,7 @@ impl PlexClient {
         }
 
         let container: MediaContainerWrapper<MediaContainer> =
-            from_reqwest_response(res).await.unwrap();
+            from_reqwest_response(res).await?;
         Ok(container)
     }
 
@@ -331,19 +344,31 @@ impl PlexClient {
         &self,
         id: i32,
     ) -> Result<MediaContainerWrapper<MediaContainer>> {
-        let res = self.get("/hubs".to_string()).await.unwrap();
+        let res = self.get("/hubs".to_string()).await?;
+        if !res.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "upstream hubs request returned {}",
+                res.status()
+            ));
+        }
         let container: MediaContainerWrapper<MediaContainer> =
-            from_reqwest_response(res).await.unwrap();
+            from_reqwest_response(res).await?;
         Ok(container)
     }
 
     pub async fn get_item_by_key(
-        self,
+        &self,
         key: String,
     ) -> Result<MediaContainerWrapper<MediaContainer>> {
-        let res = self.get(key).await.unwrap();
+        let res = self.get(key).await?;
+        if !res.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "upstream item request returned {}",
+                res.status()
+            ));
+        }
         let container: MediaContainerWrapper<MediaContainer> =
-            from_reqwest_response(res).await.unwrap();
+            from_reqwest_response(res).await?;
         Ok(container)
     }
 
@@ -892,8 +917,8 @@ impl PlexClient {
         let cache_key = self.generate_cache_key(name.clone());
         let cached = self.get_cache(&cache_key).await?;
 
-        if cached.is_some() {
-            return Ok(cached.unwrap());
+        if let Some(cached) = cached {
+            return Ok(cached);
         }
         let r = f.await?;
         self.insert_cache(cache_key, r.clone()).await;
@@ -907,9 +932,9 @@ impl PlexClient {
         let cached_result: Option<Option<String>> =
             GLOBAL_CACHE.get(cache_key.as_str()).await;
 
-        if cached_result.is_some() {
+        if let Some(cached_result) = cached_result {
             //tracing::debug!("Returning cached version");
-            return cached_result.unwrap();
+            return cached_result;
         }
 
         let mut container: MediaContainerWrapper<MediaContainer> =
@@ -926,10 +951,9 @@ impl PlexClient {
                 }
             };
 
-        let metadata = container.media_container.children_mut().get(0);
         let mut image: Option<String> = None;
-        if metadata.is_some() {
-            for i in &metadata.unwrap().images {
+        if let Some(metadata) = container.media_container.children_mut().first() {
+            for i in &metadata.images {
                 if i.r#type == "coverArt" {
                     image = Some(i.url.clone());
                     break;
@@ -963,20 +987,19 @@ impl PlexClient {
             uuid
         );
 
-        let mut req = reqwest::Request::new(
-            http::Method::GET,
-            url.parse::<url::Url>().unwrap(),
-        );
+        let provider_url = url.parse::<url::Url>().map_err(|error| {
+            anyhow::anyhow!("invalid provider metadata URL: {error}")
+        })?;
+        let mut req = reqwest::Request::new(http::Method::GET, provider_url);
         let mut headers = HeaderMap::new();
 
         //endpoint is buggy, if llex has a cached version then it doesnt need a plex token
         // but if not cached then a server admin token is needed
-        let mut token = config.token.clone();
-        if token.is_some() {
-            headers.insert(
-                "X-Plex-Token",
-                header::HeaderValue::from_str(token.unwrap().as_str()).unwrap(),
-            );
+        if let Some(token) = config.token.as_deref() {
+            let token = header::HeaderValue::from_str(token).map_err(|error| {
+                anyhow::anyhow!("configured Plex token is not a valid header value: {error}")
+            })?;
+            headers.insert("X-Plex-Token", token);
         };
 
         headers.insert(

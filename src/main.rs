@@ -1,6 +1,3 @@
-#[macro_use]
-extern crate tracing;
-
 use replex::config::Config;
 use replex::routes::*;
 use replex::state::AppState;
@@ -22,7 +19,7 @@ async fn main() {
     };
 
     // set default log level
-    if let Err(i) = env::var("RUST_LOG") {
+    if env::var("RUST_LOG").is_err() {
         env::set_var("RUST_LOG", "info")
     }
 

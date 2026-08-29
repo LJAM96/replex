@@ -122,7 +122,7 @@ async fn playback_enforcement_scenarios() {
         if let Some(product) = product_header {
             client = client.add_header("X-Plex-Product", product, true);
         }
-        let mut res = client.send(service).await;
+        let res = client.send(service).await;
         res.status_code.unwrap_or(StatusCode::OK)
     }
 

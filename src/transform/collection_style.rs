@@ -23,23 +23,27 @@ impl Transform for CollectionStyleTransform {
         plex_client: PlexClient,
         options: PlexContext,
     ) -> MediaContainer {
+        let Some(collection_id) = self.collection_ids.first().copied() else {
+            return item;
+        };
         let collection_details = plex_client
             .clone()
             .get_cached(
-                plex_client.get_collection(self.collection_ids[0] as i32),
-                format!("collection:{}", self.collection_ids[0].to_string()),
+                plex_client.get_collection(collection_id as i32),
+                format!("collection:{collection_id}"),
             )
             .await;
 
-        if collection_details.is_ok()
-            && collection_details
-                .unwrap()
-                .media_container
-                .children()
-                .get(0)
-                .unwrap()
-                .has_label("REPLEXHERO".to_string())
-        {
+        let is_hero = collection_details
+            .ok()
+            .and_then(|mut details| {
+                details.media_container.children().first().cloned()
+            })
+            .is_some_and(|metadata| {
+                metadata.has_label("REPLEXHERO".to_string())
+            });
+
+        if is_hero {
             // let mut futures = FuturesOrdered::new();
             // let now = Instant::now();
 
@@ -49,8 +53,8 @@ impl Transform for CollectionStyleTransform {
 
             let mut futures = FuturesOrdered::new();
             for mut child in item.children() {
-                if style.child_type.clone().is_some() {
-                    child.r#type = style.child_type.clone().unwrap();
+                if let Some(child_type) = style.child_type.clone() {
+                    child.r#type = child_type;
                 }
 
                 let client = plex_client.clone();

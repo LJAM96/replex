@@ -90,29 +90,32 @@ pub fn encode_url_path(path: &str) -> String {
         .join("/")
 }
 
-pub fn get_collection_id_from_child_path(path: String) -> i32 {
+pub fn get_collection_id_from_child_path(path: String) -> Option<i32> {
     let mut path = path.replace("/library/collections/", "");
     path = path.replace("/children", "");
-    path.parse().unwrap()
+    path.parse().ok()
 }
 
-pub fn get_collection_id_from_hub(hub: &MetaData) -> i32 {
+pub fn get_collection_id_from_hub(hub: &MetaData) -> Option<i32> {
     hub.hub_identifier
-        .clone()
-        .unwrap()
+        .as_deref()?
         .split('.')
-        .last()
-        .unwrap()
+        .last()?
         .parse()
-        .unwrap()
+        .ok()
 }
 
 pub fn replace_query(query: MultiMap<String, String>, req: &mut SalvoRequest) {
-    let mut url = Url::parse(req.uri_mut().to_string().as_str()).unwrap();
+    let Ok(mut url) = Url::parse(req.uri().to_string().as_str()) else {
+        tracing::debug!(uri = %req.uri(), "Ignoring query replacement for malformed URI");
+        return;
+    };
     url.query_pairs_mut()
         .clear()
         .extend_pairs(&query.iter().map(|(k, v)| (k, v)).collect_vec());
-    req.set_uri(hyper::Uri::try_from(url.as_str()).unwrap())
+    if let Ok(uri) = hyper::Uri::try_from(url.as_str()) {
+        req.set_uri(uri);
+    }
 }
 
 pub fn add_query_param_salvo(
@@ -125,7 +128,10 @@ pub fn add_query_param_salvo(
     //     .with_query(req.uri_mut().query());
     // let mut uri =
     //     pathetic::Uri::new(req.uri_mut().to_string().as_str()).unwrap();
-    let mut url = Url::parse(req.uri_mut().to_string().as_str()).unwrap();
+    let Ok(mut url) = Url::parse(req.uri().to_string().as_str()) else {
+        tracing::debug!(uri = %req.uri(), "Ignoring query update for malformed URI");
+        return;
+    };
     let mut query: Vec<(String, String)> = url // remove existing values
         .query_pairs()
         .filter(|(name, _)| name.to_string() != param.to_string())
@@ -136,7 +142,9 @@ pub fn add_query_param_salvo(
     // dbg!(&url.as_str());
     // dbg!(uri.host());
     //*req.uri_mut() = hyper::Uri::try_from(url.as_str()).unwrap();
-    req.set_uri(hyper::Uri::try_from(url.as_str()).unwrap())
+    if let Ok(uri) = hyper::Uri::try_from(url.as_str()) {
+        req.set_uri(uri);
+    }
     // req
 }
 
@@ -237,7 +245,12 @@ pub async fn from_reqwest_response_mut(
 pub async fn from_hyper_response(
     res: HyperResponse,
 ) -> Result<MediaContainerWrapper<MediaContainer>, Error> {
-    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let bytes = res
+        .into_body()
+        .collect()
+        .await
+        .map_err(Error::other)?
+        .to_bytes();
     from_bytes(bytes)
 }
 
@@ -245,7 +258,7 @@ pub async fn from_salvo_response(
     res: &mut SalvoResponse,
 ) -> Result<MediaContainerWrapper<MediaContainer>, Error> {
     //let bytes = res.take_body().to_bytes();
-    let bytes = res.take_bytes(None).await.unwrap();
+    let bytes = res.take_bytes(None).await.map_err(Error::other)?;
     from_bytes(bytes)
 }
 
@@ -303,9 +316,10 @@ pub async fn to_string(
     content_type: &ContentType,
 ) -> Result<String> {
     match content_type {
-        ContentType::Json => Ok(serde_json::to_string(&container).unwrap()),
+        ContentType::Json => Ok(serde_json::to_string(&container)?),
         // ContentType::Xml => Ok("".to_owned()),
-        ContentType::Xml => Ok(to_xml_str(&container.media_container).unwrap()),
+        ContentType::Xml => to_xml_str(&container.media_container)
+            .map_err(|error| anyhow::anyhow!(error)),
     }
 }
 

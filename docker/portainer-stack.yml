@@ -58,7 +58,10 @@ services:
       # Replex. Fully unrestricted accounts follow this setting exactly: true
       # redirects to Plex for performance, false proxies through Replex.
       # Identity fail-open also preserves this configured transport mode.
-      REPLEX_REDIRECT_STREAMS: "true"
+      # The hardened example keeps this false so normal clients never need a
+      # direct route to the Plex origin. Only enable redirects if that tradeoff
+      # is intentional and unrestricted clients may reach the redirect host.
+      REPLEX_REDIRECT_STREAMS: "false"
       # Optional: extra account tokens for the internal warmer to pre-fetch, so
       # accounts other than REPLEX_TOKEN also get cold-start-free hubs/library.
       # Comma separated; leave empty to warm only the admin token.
@@ -115,8 +118,7 @@ volumes:
 # ----------------------------------------------------------------------
 #
 # Notes:
-# - With REPLEX_REDIRECT_STREAMS=true, fully unrestricted video bytes are
-#   redirected straight to Plex. Resolution or bitrate restricted video bytes
-#   always traverse Replex.
+# - This hardened example keeps REPLEX_REDIRECT_STREAMS=false so all video
+#   bytes traverse Replex and the Plex origin can remain private to clients.
 # - After deploy + tunnel hostname configured, set Plex's Custom server
 #   access URL to https://replex.yourdomain.com

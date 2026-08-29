@@ -16,12 +16,16 @@ impl Transform for HubKeyTransform {
         options: PlexContext,
     ) {
         if item.is_hub()
-            && item.key.is_some()
-            && !item.key.clone().unwrap().starts_with("/replex")
+            && item
+                .key
+                .as_deref()
+                .is_some_and(|key| !key.starts_with("/replex"))
         {
             // might already been set by the mixings
             // setting an url argument crashes client. So we use the path
-            let old_key = item.key.clone().unwrap();
+            let Some(old_key) = item.key.clone() else {
+                return;
+            };
             item.key = Some(format!(
                 "/replex/{}{}",
                 item.style

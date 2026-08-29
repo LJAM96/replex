@@ -130,12 +130,8 @@ impl TransformBuilder {
 
         if container.media_container.size.is_some() {
             container.media_container.size = Some(
-                container
-                    .media_container
-                    .children_mut()
-                    .len()
-                    .try_into()
-                    .unwrap(),
+                i64::try_from(container.media_container.children_mut().len())
+                    .unwrap_or(i64::MAX),
             );
         }
     }

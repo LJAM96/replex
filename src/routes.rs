@@ -953,17 +953,17 @@ async fn proxy_for_transform(
 // state. Security handlers ignore this flag; optional transforms may opt out.
 #[handler]
 async fn should_skip(req: &mut Request, depot: &mut Depot) {
-    let context: PlexContext = req.extract().await.unwrap();
-
-    let is_livetv = match context.path.clone() {
-        Some(v) => v.contains("livetv"),
-        None => false,
+    let Ok(request) = request_context(depot) else {
+        return;
     };
+    let context = &request.plex;
 
-    let is_plexamp = match context.product.clone() {
-        Some(v) => v.to_lowercase().contains("plexamp"),
-        None => false,
-    };
+    let is_livetv = context.path.as_deref().is_some_and(|v| v.contains("livetv"));
+
+    let is_plexamp = context
+        .product
+        .as_deref()
+        .is_some_and(|v| v.to_lowercase().contains("plexamp"));
 
     let _ = depot.insert(SKIP_OPTIONAL_TRANSFORMS_KEY, is_livetv || is_plexamp);
 }
@@ -1047,12 +1047,24 @@ async fn deliver_stream(
     res: &mut Response,
     ctrl: &mut FlowCtrl,
 ) -> anyhow::Result<()> {
+    let request_id = request_context(depot)
+        .ok()
+        .map(|context| context.request_id.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    tracing::info!(
+        request_id = %request_id,
+        path = %req.uri().path(),
+        stream_transport = ?delivery,
+        "Stream transport selected"
+    );
     match delivery {
         StreamDelivery::Proxy => {
             proxy_stream_through_replex(req, depot, res, ctrl).await;
             Ok(())
         }
-        StreamDelivery::Redirect => perform_stream_redirect(req, depot, res).await,
+        StreamDelivery::Redirect => {
+            perform_stream_redirect(req, depot, res).await
+        }
     }
 }
 
@@ -1264,24 +1276,22 @@ async fn fix_photo_transcode_request(
     _depot: &mut Depot,
     res: &mut Response,
 ) {
-    let context: PlexContext = req.extract().await.unwrap();
-    if context.size.is_some() && context.clone().size.unwrap().contains('-')
-    // (catched things like (medlium-240, large-500),i dont think size paramater orks at all, but who knows
-    // && context.platform.is_some()
-    // && context.clone().platform.unwrap().to_lowercase() == "android"
+    let context = match req.extract::<PlexContext>().await {
+        Ok(context) => context,
+        Err(error) => {
+            tracing::debug!(error = ?error, "Ignoring malformed optional photo context");
+            return;
+        }
+    };
+    if let Some(size) = context
+        .size
+        .as_deref()
+        .filter(|value| value.contains('-'))
+        .and_then(|value| value.rsplit('-').next())
+        .filter(|value| !value.is_empty())
     {
-        let size: String = context
-            .clone()
-            .size
-            .unwrap()
-            .split('-')
-            .last()
-            .unwrap()
-            .parse()
-            .unwrap();
-        add_query_param_salvo(req, "height".to_string(), size.clone());
-        add_query_param_salvo(req, "width".to_string(), size.clone());
-        //add_query_param_salvo(req, "quality".to_string(), "80".to_string());
+        add_query_param_salvo(req, "height".to_string(), size.to_string());
+        add_query_param_salvo(req, "width".to_string(), size.to_string());
     }
 }
 
@@ -1292,13 +1302,29 @@ async fn resolve_local_media_path(
     depot: &mut Depot,
     res: &mut Response,
 ) {
-    let mut context: PlexContext = req.extract().await.unwrap();
-    let url = req.query::<String>("url");
-    if url.is_some() && url.clone().unwrap().contains("/replex/image/hero") {
-        let uri: url::Url = url::Url::parse(url.unwrap().as_str()).unwrap();
-        let segments = uri.path_segments().unwrap().collect::<Vec<&str>>();
-
-        let uuid = segments.last().unwrap().replace(".jpg", "");
+    let context = match req.extract::<PlexContext>().await {
+        Ok(context) => context,
+        Err(error) => {
+            tracing::debug!(error = ?error, "Ignoring malformed optional media path context");
+            return;
+        }
+    };
+    let Some(raw_url) = req.query::<String>("url") else {
+        return;
+    };
+    if raw_url.contains("/replex/image/hero") {
+        let Ok(uri) = url::Url::parse(&raw_url) else {
+            tracing::debug!("Ignoring malformed hero image URL");
+            return;
+        };
+        let Some(uuid) = uri
+            .path_segments()
+            .and_then(|segments| segments.last())
+            .map(|segment| segment.replace(".jpg", ""))
+            .filter(|uuid| !uuid.is_empty())
+        else {
+            return;
+        };
         //if context.token.is_none() {
         //    context.token = Some(segments.last().unwrap().to_string());
         //}
@@ -1311,9 +1337,8 @@ async fn resolve_local_media_path(
                 return;
             }
         };
-        let rurl = plex_client.get_hero_art(uuid.to_string()).await;
-        if rurl.is_some() {
-            add_query_param_salvo(req, "url".to_string(), rurl.unwrap());
+        if let Some(rurl) = plex_client.get_hero_art(uuid).await {
+            add_query_param_salvo(req, "url".to_string(), rurl);
         }
     }
 }
@@ -1339,10 +1364,14 @@ async fn debug(
     res: &mut Response,
     ctrl: &mut FlowCtrl,
 ) {
-    //dbg!("tequested");
-    let context: PlexContext = req.extract().await.unwrap();
-    dbg!(&context.token);
-    //dbg!(&req);
+    if let Ok(context) = request_context(depot) {
+        tracing::debug!(
+            request_id = %context.request_id,
+            token_scope = %context.token_scope,
+            path = %req.uri().path(),
+            "Debug request"
+        );
+    }
 }
 
 #[handler]
@@ -1356,40 +1385,63 @@ async fn ntf_watchlist_force(
         return;
     }
 
-    // use memory_stats::memory_stats;
-    // dbg!(memory_stats().unwrap().physical_mem / 1024 / 1000);
-    let context: PlexContext = req.extract().await.unwrap();
-    if context.clone().token.is_some() {
+    let context = match request_context(depot) {
+        Ok(context) => context.plex.clone(),
+        Err(error) => {
+            tracing::debug!(error = %error, "Skipping optional notification bootstrap without request context");
+            return;
+        }
+    };
+    let state = match state::from_depot(depot) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::debug!(error = %error, "Skipping optional notification bootstrap without application state");
+            return;
+        }
+    };
+    if let (Some(token), Some(client_id)) =
+        (context.token.clone(), context.client_identifier.clone())
+    {
+        let client = state.identity_http.clone();
         tokio::spawn(async move {
-            let token = context.clone().token.unwrap();
-            let client_id = context.clone().client_identifier.unwrap();
             let url = format!("https://notifications.plex.tv/api/v1/notifications/settings?X-Plex-Token={}", &token);
             let json_data = r#"{"enabled": true,"libraries": [],"identifier": "tv.plex.notification.library.new"}"#;
-            let client = reqwest::Client::new();
 
             tracing::info!(
-                username = %context.clone().username.unwrap_or_default(),
-                platform = %context.clone().product.unwrap_or_default(),
-                platform = %context.clone().device_name.unwrap_or_default(),
-                "Bootstrao for request"
+                username = %context.username.clone().unwrap_or_default(),
+                product = %context.product.clone().unwrap_or_default(),
+                device = %context.device_name.clone().unwrap_or_default(),
+                "Notification bootstrap for request"
             );
 
             let client_base = "https://clients.plex.tv";
-            let res = client
+            let res = match client
                 .get(format!("{}/api/v2/user", client_base))
                 .header("Accept", "application/json")
                 .header("X-Plex-Token", &token)
                 .header("X-Plex-Client-Identifier", &client_id)
                 .send()
                 .await
-                .unwrap();
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::debug!(error = %error, "Notification bootstrap identity request failed");
+                    return;
+                }
+            };
 
             if !res.status().is_success() {
                 tracing::info!("cannot get user");
                 return;
             }
 
-            let user: PlexUser = res.json().await.unwrap();
+            let user: PlexUser = match res.json().await {
+                Ok(user) => user,
+                Err(error) => {
+                    tracing::debug!(error = %error, "Notification bootstrap identity response was invalid");
+                    return;
+                }
+            };
             tracing::info!(
                 id = %user.id,
                 uuid = %user.uuid,
@@ -1397,13 +1449,19 @@ async fn ntf_watchlist_force(
                 "got user"
             );
 
-            let response = client
+            let response = match client
                 .post(url)
                 .header("Content-Type", "application/json")
                 .body(json_data.to_owned())
                 .send()
                 .await
-                .unwrap();
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::debug!(error = %error, "Notification settings request failed");
+                    return;
+                }
+            };
 
             tracing::info!(
                 status = %response.status(),
@@ -1419,14 +1477,20 @@ async fn ntf_watchlist_force(
                 client_base, &user.uuid
             );
             for key in opts {
-                let response = client
+                let response = match client
                     .post(format!("{}?key={}&value=opt_out", u.clone(), key))
                     .header("Accept", "application/json")
                     .header("X-Plex-Token", &token)
                     .header("X-Plex-Client-Identifier", &client_id)
                     .send()
                     .await
-                    .unwrap();
+                {
+                    Ok(response) => response,
+                    Err(error) => {
+                        tracing::debug!(error = %error, key = key, "Notification opt-out request failed");
+                        continue;
+                    }
+                };
 
                 tracing::info!(
                 status = %response.status(),
@@ -1486,9 +1550,22 @@ pub async fn hero_image(
     ctrl: &mut FlowCtrl,
     depot: &mut Depot,
 ) {
-    let context: PlexContext = req.extract().await.unwrap();
-    let t = req.param::<String>("type").unwrap();
-    let uuid = req.param::<String>("uuid").unwrap();
+    let context = match req.extract::<PlexContext>().await {
+        Ok(context) => context,
+        Err(error) => {
+            tracing::debug!(error = ?error, "Hero image request contained invalid context");
+            res.status_code(StatusCode::BAD_REQUEST);
+            return;
+        }
+    };
+    let Some(_image_type) = req.param::<String>("type") else {
+        res.status_code(StatusCode::BAD_REQUEST);
+        return;
+    };
+    let Some(uuid) = req.param::<String>("uuid") else {
+        res.status_code(StatusCode::BAD_REQUEST);
+        return;
+    };
 
     let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
@@ -1498,17 +1575,16 @@ pub async fn hero_image(
             return;
         }
     };
-    let url = plex_client.get_hero_art(uuid).await;
-    if url.is_none() {
+    let Some(url) = plex_client.get_hero_art(uuid).await else {
         res.status_code(StatusCode::NOT_FOUND);
         return;
-    }
+    };
     // let uri = url.unwrap().parse::<http::Uri>().unwrap();;
     // req.set_uri(uri);
     // let proxy = proxy("https://metadata-static.plex.tv".to_string());
     // proxy.handle(req, depot, res, ctrl).await;
 
-    res.render(Redirect::found(url.unwrap()));
+    res.render(Redirect::found(url));
 }
 
 // if directplay fails we remove it.
@@ -1536,8 +1612,8 @@ pub async fn direct_stream_fallback(
 
     let direct_play = queries
         .get("directPlay")
-        .unwrap_or(&"1".to_string())
-        .to_owned();
+        .map(String::as_str)
+        .unwrap_or("1");
 
     if direct_play != "1" {
         return Ok(());
@@ -1548,16 +1624,13 @@ pub async fn direct_stream_fallback(
         .handle(req, depot, res_upstream, ctrl)
         .await;
 
-    match res_upstream.status_code.unwrap() {
+    match res_upstream.status_code.unwrap_or(StatusCode::BAD_GATEWAY) {
         http::StatusCode::OK => {
             let container: MediaContainerWrapper<MediaContainer> =
             //from_reqwest_response(upstream_res).await?;
             from_salvo_response(res_upstream).await?;
 
-            if container.media_container.general_decision_code.is_some()
-                && container.media_container.general_decision_code.unwrap()
-                    == 2000
-            {
+            if container.media_container.general_decision_code == Some(2000) {
                 tracing::debug!(
                     "Direct play not avaiable, falling back to direct stream"
                 );
@@ -1645,7 +1718,7 @@ async fn apply_policy_transforms(
                     uri = ?req.uri(),
                     "Policy transform could not parse response"
                 );
-                return Err(salvo::http::StatusError::bad_request().into());
+                return Err(salvo::http::StatusError::bad_gateway().into());
             }
         };
     container.content_type = content_type;
@@ -1769,7 +1842,7 @@ pub async fn cached_hubs_response(
 ) -> Result<(), anyhow::Error> {
     let compatibility_passthrough = skip_optional_transforms(depot);
 
-    let context: PlexContext = req.extract().await.unwrap();
+    let context = request_context(depot)?.plex.clone();
     let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
@@ -1871,7 +1944,7 @@ pub async fn transform_hubs_response(
     depot: &mut Depot,
     res: &mut Response,
 ) -> Result<(), anyhow::Error> {
-    let context: PlexContext = req.extract().await.unwrap();
+    let context = request_context(depot)?.plex.clone();
     let plex_client = match plex_client_from_depot(&context, depot) {
         Ok(c) => c,
         Err(e) => {
@@ -1948,6 +2021,10 @@ pub async fn transform_req_content_directory(
     // The new experience sends neither — in that case we let the request pass
     // through unmodified so the proxy doesn't return an empty container.
     if let Some(ref pinned) = context.clone().pinned_content_directory_id {
+        let Some(first_pinned) = pinned.first() else {
+            tracing::debug!("Ignoring empty pinnedContentDirectoryID list");
+            return;
+        };
         // Mobile/tv clients fire only ONE promoted request per refresh (a
         // single slot). Giving them the intentional-empty second-slot
         // response leaves their home screen with nothing on it, so they
@@ -1965,7 +2042,7 @@ pub async fn transform_req_content_directory(
             Some(c) if c.len() > 1 => true,
             // Legacy clients page through one slot at a time; only the first
             // pinned slot carries the merged payload.
-            Some(c) => c[0] == pinned[0],
+            Some(c) => c.first().is_some_and(|first| first == first_pinned),
             // Absent → treat as first directory.
             None => true,
         };
@@ -2101,7 +2178,8 @@ pub async fn get_collections_children(
         MediaContainerWrapper::default();
     container.content_type = content_type;
     let size = container.media_container.children().len();
-    container.media_container.size = Some(i64::try_from(size).unwrap_or(i64::MAX));
+    container.media_container.size =
+        Some(i64::try_from(size).unwrap_or(i64::MAX));
     container.media_container.offset = Some(offset);
 
     // filtering of watched happens in the transform
@@ -2352,11 +2430,12 @@ async fn force_maximum_quality(
         queries.insert(query_key, filtered_extra);
     };
 
-    if config.force_direct_play_for.is_some() && queries.get("path").is_some() {
-        let resos = config.force_direct_play_for.unwrap();
+    if let (Some(resos), Some(path)) =
+        (config.force_direct_play_for.as_ref(), queries.get("path"))
+    {
         let item = plex_client
             .clone()
-            .get_item_by_key(req.queries().get("path").unwrap().to_string())
+            .get_item_by_key(path.to_string())
             .await
             .unwrap();
 
@@ -2543,8 +2622,14 @@ async fn video_transcode_fallback(
             .unwrap()
     };
 
-    let fallback_for =
-        config.video_transcode_fallback_for.unwrap()[0].to_lowercase();
+    let Some(fallback_for) = config
+        .video_transcode_fallback_for
+        .as_ref()
+        .and_then(|values| values.first())
+        .map(|value| value.to_lowercase())
+    else {
+        return Ok(());
+    };
 
     let item = plex_client
         .clone()

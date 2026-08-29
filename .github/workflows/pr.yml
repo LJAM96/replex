@@ -54,6 +54,14 @@ jobs:
         # ones; treat the output as informational until the tree is clean.
         run: cargo audit || true
 
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Dependency policy
+        run: cargo deny check
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -65,3 +73,23 @@ jobs:
           platforms: linux/amd64
           push: false
           tags: replex:pr
+
+  policy-regressions:
+    name: Resolution policy regression suite
+    runs-on: ubuntu-latest
+    env:
+      REPLEX_RESOLUTION_POLICY_ENABLED: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Protected playback and direct part tests
+        run: cargo test --test playback --test direct_parts

@@ -12,17 +12,15 @@ fn client_for(token: Option<&str>) -> PlexClient {
     let mut context = PlexContext::default();
     context.token = token.map(|t| t.to_string());
     context.client_identifier = Some("replex-test".to_string());
-
-    PlexClient {
-        http_client: reqwest_middleware::ClientBuilder::new(
-            reqwest::Client::new(),
-        )
-        .build(),
-        context,
-        host: "http://localhost:32400".to_string(),
-        cache: moka::future::Cache::builder().max_capacity(10).build(),
-        default_headers: http::HeaderMap::new(),
+    let mut construction_context = context.clone();
+    if construction_context.token.is_none() {
+        construction_context.token =
+            Some("replex-test-missing-token".to_string());
     }
+    let mut client = PlexClient::from_context(&construction_context).unwrap();
+    client.context = context;
+    client.host = "http://localhost:32400".to_string();
+    client
 }
 
 fn client_for_host(token: Option<&str>, host: &str) -> PlexClient {

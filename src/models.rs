@@ -1373,7 +1373,7 @@ impl MetaData {
             (config.hero_rows.as_ref(), self.hub_identifier.as_ref())
         {
             for row in rows {
-                if !row.is_empty() && id.contains(&row) {
+                if !row.is_empty() && id.contains(row) {
                     return Ok(true);
                 }
             }
@@ -1381,7 +1381,10 @@ impl MetaData {
         if !self.is_collection_hub() {
             return Ok(false);
         }
-        let collection_id = get_collection_id_from_hub(self);
+        let Some(collection_id) = get_collection_id_from_hub(self) else {
+            tracing::debug!(hub = ?self.hub_identifier, "Collection hub had no parseable collection id");
+            return Ok(false);
+        };
         let mut collection_details = plex_client
             .clone()
             .get_cached(
@@ -1427,29 +1430,29 @@ impl MetaData {
             return Ok(config.exclude_watched);
         }
 
+        let Some(collection_id) = get_collection_id_from_hub(self) else {
+            tracing::debug!(hub = ?self.hub_identifier, "Collection hub had no parseable collection id");
+            return Ok(config.exclude_watched);
+        };
         let collection = plex_client
             .clone()
             .get_cached(
-                plex_client
-                    .get_collection(get_collection_id_from_hub(self) as i32),
-                format!("collection:{}", get_collection_id_from_hub(self))
-                    .to_string(),
+                plex_client.get_collection(collection_id),
+                format!("collection:{collection_id}"),
             )
             .await?;
 
         Ok(config.exclude_watched
-            || collection
-                .media_container
-                .metadata
-                .first()
-                .is_some_and(|metadata| {
+            || collection.media_container.metadata.first().is_some_and(
+                |metadata| {
                     metadata.has_label("REPLEX_EXCLUDE_WATCHED".to_string())
-                }))
+                },
+            ))
     }
 
     // TODO: Does not work when using a new instance
     pub fn set_children(&mut self, value: Vec<MetaData>) {
-        let len: i32 = value.len().try_into().unwrap();
+        let len = i32::try_from(value.len()).unwrap_or(i32::MAX);
         if !self.metadata.is_empty() {
             self.metadata = value;
         } else if !self.directory.is_empty() {

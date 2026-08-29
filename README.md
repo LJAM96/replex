@@ -180,6 +180,7 @@ How it works:
   permitted version; transcode fallback can never cross the limit.
 * Direct media part URLs whose cached resolution or source bitrate violates the current policy return 403. For restricted accounts, **unknown** parts (Replex has never classified from metadata/playback) are always blocked. Restricted accounts' part and transcode-session streams are always proxied through Replex, so the client never receives the Plex origin URL.
 * Fully unrestricted accounts, meaning no resolution or bitrate cap, follow `REPLEX_REDIRECT_STREAMS` exactly: `true` redirects stream bytes to the Plex origin, while `false` proxies them through Replex. Identity fail-open uses the same configured transport mode rather than implicitly enabling redirects.
+* Authenticated hub metadata, library payloads and artwork caches are account scoped. Replex deliberately spends additional cache memory so a response fetched by one Plex account can never become an authorisation shortcut for another account. Cached raw library payloads are still re-filtered against the requesting account's current policy on every hit.
 
 Requirements and limitations:
 
@@ -214,8 +215,17 @@ For custom collections you can change the hub style to hero by setting the label
 
 For built in rows you can use the hubidentifier in the `REPLEX_HERO_ROWS`. See the setting for available know options.
 
-Note: hero style elements uses coverart from plex. Banner or background is not used.
-Note: Hero elements are not supported for continue watching by plex. You can replicate this functionality by creating a smart collection which filters on in progress and settinf REPLEX_DISABLE_CONTINUE_WATCHING
+Hero style elements use Plex cover art. Replex preserves the rest of Plex's
+native artwork metadata while adding the `coverArt` entry used by hero rows,
+which improves compatibility with current Plex Experience clients that may
+choose artwork differently on different platforms.
+
+Modern Plex Media Server versions can return Continue Watching
+(`home.continue`) as a native `style=hero` hub. Replex keeps that hero style
+and applies the same cover-art transformation to its children, so Continue
+Watching does not need to be recreated as a smart collection on current
+servers. Older Plex clients and server versions can still render hubs
+differently, so client compatibility should be validated when upgrading Plex.
 
 ## Exclude watched items
 
@@ -251,6 +261,8 @@ If you have for example an appbox it might not be ideal to stream media through 
 You can redirect fully unrestricted streams by enabling `REPLEX_REDIRECT_STREAMS` and optionally set `REPLEX_REDIRECT_STREAMS_HOST` if it needs to be different from REPLEX_HOST. Accounts with a resolution or bitrate restriction never redirect because doing so would expose a direct path around the policy.
 
 The transport matrix is: restricted account -> proxy; unrestricted account with redirects enabled -> redirect; unrestricted account with redirects disabled -> proxy. When identity fail-open is enabled and identity resolution fails, Replex removes the restriction decision but still follows the configured redirect setting.
+
+For a hardened deployment, keep `REPLEX_REDIRECT_STREAMS=false` and make the Plex origin reachable only from Replex. This keeps every normal client on the Replex or Cloudflare Tunnel path. Enabling redirects is a performance tradeoff for unrestricted accounts and requires those clients to be able to reach the configured Plex redirect origin.
 
 Note: Plex doesnt handle redirects wel, and will not remeber it. So every chuck of a stream will first hit replex and then gets redirected to actuall download that chuck from the redirect url. So a bit wastefull
 

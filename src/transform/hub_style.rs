@@ -213,8 +213,8 @@ impl Transform for HubStyleTransform {
                 // let now = Instant::now();
 
                 for mut child in item.children() {
-                    if style.child_type.clone().is_some() {
-                        child.r#type = style.child_type.clone().unwrap();
+                    if let Some(child_type) = style.child_type.clone() {
+                        child.r#type = child_type;
                     }
 
                     let client = plex_client.clone();
@@ -233,5 +233,89 @@ impl Transform for HubStyleTransform {
                 item.set_children(children);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ClientHeroStyle, Platform, PlexContext};
+
+    fn context(platform: Platform, product: &str) -> PlexContext {
+        PlexContext {
+            platform: Some(platform),
+            product: Some(product.to_string()),
+            ..PlexContext::default()
+        }
+    }
+
+    #[test]
+    fn preview_client_hero_profiles_keep_expected_artwork_fallbacks() {
+        let web = ClientHeroStyle::from_context(context(
+            Platform::Chrome,
+            "Plex Web",
+        ));
+        assert_eq!(web.style.as_deref(), Some("hero"));
+        assert!(web.include_meta);
+        assert!(web.cover_art_as_thumb);
+        assert!(web.cover_art_as_art);
+
+        let ios = ClientHeroStyle::from_context(context(
+            Platform::Ios,
+            "Plex for iOS",
+        ));
+        assert_eq!(ios.style.as_deref(), Some("hero"));
+        assert!(ios.include_meta);
+        assert!(!ios.cover_art_as_thumb);
+        assert!(ios.cover_art_as_art);
+
+        let tvos = ClientHeroStyle::from_context(context(
+            Platform::TvOS,
+            "Plex for Apple TV",
+        ));
+        assert_eq!(tvos.style.as_deref(), Some("hero"));
+        assert!(tvos.include_meta);
+        assert!(!tvos.cover_art_as_thumb);
+        assert!(tvos.cover_art_as_art);
+
+        let roku = ClientHeroStyle::from_context(context(
+            Platform::Roku,
+            "Plex for Roku",
+        ));
+        assert_eq!(roku.style.as_deref(), Some("hero"));
+        assert!(roku.include_meta);
+        assert!(roku.cover_art_as_thumb);
+        assert!(!roku.cover_art_as_art);
+
+        let android_tv = ClientHeroStyle::from_context(context(
+            Platform::Android,
+            "Plex for Android (TV)",
+        ));
+        assert_eq!(android_tv.style.as_deref(), Some("hero"));
+        assert_eq!(android_tv.child_type.as_deref(), Some("clip"));
+        assert!(android_tv.include_meta);
+        assert!(android_tv.cover_art_as_thumb);
+        assert!(android_tv.cover_art_as_art);
+    }
+
+    #[test]
+    fn continue_watching_golden_fixture_remains_a_hero_hub() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/mock/out/hubs_promoted_6.json"
+        ))
+        .expect("promoted hubs fixture should be valid JSON");
+        let hubs = fixture["MediaContainer"]["Hub"]
+            .as_array()
+            .expect("promoted hubs fixture should contain hubs");
+        let continue_watching = hubs
+            .iter()
+            .find(|hub| hub["hubIdentifier"] == "home.continue")
+            .expect("fixture should contain Continue Watching");
+
+        assert_eq!(continue_watching["style"], "hero");
+        assert!(continue_watching["Meta"].is_object());
+        let first_child = &continue_watching["Metadata"][0];
+        assert!(first_child["Image"].as_array().is_some_and(|images| images
+            .iter()
+            .any(|image| image["type"] == "coverArt")));
     }
 }

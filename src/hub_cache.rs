@@ -17,21 +17,17 @@ use crate::config::Config;
 use crate::models::*;
 use crate::plex_client::PlexClient;
 use crate::routes::PHOTO_CACHE;
+use crate::state::AppState;
 use crate::utils::from_reqwest_response;
 use moka::future::Cache;
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Fetch time per `hubcache:` key. No entry == unknown age == stale.
-static HUB_FETCHED_AT: Lazy<Cache<String, Instant>> = Lazy::new(|| {
-    let c: Config = Config::figment().extract().unwrap();
-    Cache::builder()
-        .max_capacity(10_000)
-        .time_to_live(Duration::from_secs(c.cache_ttl))
-        .build()
-});
+static HUB_FETCHED_AT: Lazy<Cache<String, Instant>> =
+    Lazy::new(|| Cache::builder().max_capacity(10_000).build());
 
 /// Last background refresh attempt per key. Rate-limits refreshes so a
 /// stream of playback events cannot hammer an upstream that is slow to
@@ -238,20 +234,9 @@ pub(crate) fn is_playback_invalidation(
 /// sections. Mirrors what real clients request: one promoted key per section
 /// slot (web clients page through them individually), the aggregate slot,
 /// continue watching and the /hubs/home fallback.
-async fn warm_paths(host: &str, token: &str) -> Vec<String> {
-    let sections_url =
-        format!("{}/library/sections", host.trim_end_matches('/'));
-    tracing::debug!(url = %sections_url, "warmer listing sections");
-    let resp = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .unwrap()
-        .get(&sections_url)
-        .header("Accept", "application/json")
-        .header("X-Plex-Token", token)
-        .send()
-        .await
-    {
+async fn warm_paths(client: &PlexClient) -> Vec<String> {
+    tracing::debug!("warmer listing sections");
+    let resp = match client.get("/library/sections".to_string()).await {
         Ok(r) => {
             tracing::debug!(status = %r.status(), "warmer sections response");
             r
@@ -326,14 +311,11 @@ fn warm_token_list(config: &Config) -> Vec<String> {
 
 /// One warmer pass: for every configured token, pre-fetch that account's hubs
 /// (and poster thumbs) and library sections into the user-scoped cache scope.
-async fn warm_cycle() {
-    let config: Config = Config::figment().extract().unwrap();
+async fn warm_cycle(state: &AppState) {
+    let config = &state.config;
     if config.warm_interval == 0 {
         return;
     }
-    let Some(host) = config.host.clone() else {
-        return;
-    };
     let tokens = warm_token_list(&config);
     if tokens.is_empty() {
         tracing::debug!("warmer idle: no tokens configured");
@@ -346,21 +328,22 @@ async fn warm_cycle() {
         );
         // Library sharing is account-specific, so discover the hub paths with
         // the same token whose cache namespace is about to be warmed.
-        let paths = warm_paths(&host, token).await;
         let context = crate::models::PlexContext {
             token: Some(token.clone()),
             client_identifier: Some("replex-warmer".to_string()),
             ..Default::default()
         };
-        let client = match PlexClient::from_context(&context) {
+        let client = match PlexClient::from_context_with_state(&context, state)
+        {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to build Plex client from warmer token");
                 continue;
             }
         };
+        let paths = warm_paths(&client).await;
         warm_hubs_for_token(&client, &paths, token).await;
-        warm_library_pages(&client, &host, token).await;
+        warm_library_pages(&client, token).await;
     }
 }
 
@@ -489,19 +472,9 @@ async fn warm_hubs_for_token(
     }
 }
 
-async fn warm_library_pages(client: &PlexClient, host: &str, token: &str) {
+async fn warm_library_pages(client: &PlexClient, token: &str) {
     let sections = {
-        let url = format!("{}/library/sections", host.trim_end_matches('/'));
-        let resp = match reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .unwrap()
-            .get(&url)
-            .header("Accept", "application/json")
-            .header("X-Plex-Token", token)
-            .send()
-            .await
-        {
+        let resp = match client.get("/library/sections".to_string()).await {
             Ok(r) if r.status() == reqwest::StatusCode::OK => r,
             _ => return,
         };
@@ -546,17 +519,7 @@ async fn warm_library_pages(client: &PlexClient, host: &str, token: &str) {
             if crate::disk_cache::get(&cache_key).await.is_some() {
                 continue;
             }
-            let url = format!("{}{}", host.trim_end_matches('/'), path);
-            let resp = match reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .unwrap()
-                .get(&url)
-                .header("Accept", "application/json")
-                .header("X-Plex-Token", token)
-                .send()
-                .await
-            {
+            let resp = match client.get(path.clone()).await {
                 Ok(r) if r.status() == reqwest::StatusCode::OK => r,
                 Ok(r) => {
                     tracing::debug!(status = %r.status(), path = %path, "library warm non-200");
@@ -598,16 +561,13 @@ fn build_transcode_query(thumb: &str) -> Option<String> {
 }
 
 /// Start the background warmer loop. Runs forever; call once at startup.
-pub fn spawn_warmer() {
+pub fn spawn_warmer(state: Arc<AppState>) {
     tokio::spawn(async move {
         // Give the server a moment to bind before spending upstream time.
         tokio::time::sleep(Duration::from_secs(5)).await;
         loop {
-            warm_cycle().await;
-            let interval: u64 = {
-                let c: Config = Config::figment().extract().unwrap();
-                c.warm_interval.max(1)
-            };
+            warm_cycle(&state).await;
+            let interval = state.config.warm_interval.max(1);
             tokio::time::sleep(Duration::from_secs(interval)).await;
         }
     });
@@ -662,16 +622,9 @@ mod tests {
             client_identifier: Some("replex-test".to_string()),
             ..Default::default()
         };
-        PlexClient {
-            http_client: reqwest_middleware::ClientBuilder::new(
-                reqwest::Client::new(),
-            )
-            .build(),
-            context,
-            host,
-            cache: Cache::builder().max_capacity(100).build(),
-            default_headers: http::HeaderMap::new(),
-        }
+        let mut client = PlexClient::from_context(&context).unwrap();
+        client.host = host;
+        client
     }
 
     async fn seed(
