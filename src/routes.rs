@@ -1654,7 +1654,18 @@ pub async fn hero_image(
     // let proxy = proxy("https://metadata-static.plex.tv".to_string());
     // proxy.handle(req, depot, res, ctrl).await;
 
-    res.render(Redirect::found(url));
+    // Provider coverArt URLs are not always percent-encoded (e.g. fanart.tv
+    // returns `X-files (2).jpg` with a literal space). Salvo's Redirect
+    // panics on an invalid URI, so sanitize before redirecting.
+    let sanitized = url.replace(' ', "%20");
+    if sanitized.parse::<http::Uri>().is_ok() {
+        res.render(Redirect::found(sanitized));
+    } else if let Ok(parsed) = url::Url::parse(&sanitized) {
+        res.render(Redirect::found(parsed.to_string()));
+    } else {
+        tracing::warn!(url = %url, sanitized = %sanitized, "invalid hero image URL, cannot redirect");
+        res.status_code(StatusCode::NOT_FOUND);
+    }
 }
 
 // if directplay fails we remove it.

@@ -425,7 +425,10 @@ async fn warm_hubs_for_token(
                 if PHOTO_CACHE.get(&key).await.is_some() {
                     continue;
                 }
-                match client.get(tq.clone()).await {
+                match client
+                    .get(format!("/photo/:/transcode?{tq}"))
+                    .await
+                {
                     Ok(r) if r.status() == reqwest::StatusCode::OK => {
                         let ct = r
                             .headers()
@@ -447,8 +450,12 @@ async fn warm_hubs_for_token(
                                         },
                                     )
                                     .await;
-                                let _ =
-                                    crate::disk_cache::put(&key, &bytes).await;
+                                let _ = crate::disk_cache::put_full(
+                                    &key,
+                                    &bytes,
+                                    ct.as_deref(),
+                                )
+                                .await;
                                 budget -= 1;
                                 fetched += 1;
                             }
