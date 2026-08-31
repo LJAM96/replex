@@ -49,7 +49,7 @@ impl Handler for Logger {
             remote_addr = %req.remote_addr().to_string(),
             version = ?req.version(),
             method = %req.method(),
-            path = %req.uri(),
+            path = %req.uri().path(),
             requested_media_index = %requested_media_index,
             span.kind = "server",
             service.name = "replex",

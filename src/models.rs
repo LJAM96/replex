@@ -1,11 +1,7 @@
-use salvo::prelude::*;
 use std::fmt;
-use std::str::FromStr;
 use std::string::ToString;
 
 extern crate mime;
-use crate::config::*;
-use crate::headers;
 use crate::plex_client::PlexClient;
 use crate::utils::*;
 use anyhow::Result;
@@ -14,7 +10,6 @@ use serde_aux::prelude::{
     deserialize_number_from_string, deserialize_string_from_number,
 };
 // use smartstring::alias::String;
-use itertools::Itertools;
 use salvo::http::ReqBody;
 use salvo::http::ResBody;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -60,7 +55,15 @@ fn default_as_false() -> bool {
 }
 
 #[derive(
-    Debug, Clone, PartialEq, Eq, EnumString, EnumDisplay, Serialize, Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    EnumString,
+    EnumDisplay,
+    Serialize,
+    Deserialize,
+    Default,
 )]
 pub enum Platform {
     // #[serde(default)]
@@ -77,13 +80,8 @@ pub enum Platform {
     Web,
     #[serde(other)]
     #[strum(serialize = "Generic")]
+    #[default]
     Generic,
-}
-
-impl Default for Platform {
-    fn default() -> Self {
-        Platform::Generic
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Extractible, Default, Clone)]
@@ -222,10 +220,6 @@ pub struct PlexContext {
     pub url: Option<String>,
     // this our own fields
     // pub style: Option<Style>,
-}
-
-fn default_platform() -> Option<Platform> {
-    Some(Platform::Generic)
 }
 
 fn bool_from_int<'de, D>(deserializer: D) -> Result<bool, D::Error>

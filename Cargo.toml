@@ -74,8 +74,8 @@ rstest = "0.18.1"
 #memory-stats = "1.2.0"
 #replex = { path = ".", features = ["test"] }
 
-#[features]
-#test = []
+[features]
+tests_deny_unknown_fields = []
 
 # [patch.crates-io]
 # salvo-proxy = { path = "../salvo/crates/proxy" }

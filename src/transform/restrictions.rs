@@ -72,7 +72,7 @@ impl Transform for HubRestrictionTransform {
 
         item.hub_identifier
             .as_deref()
-            .and_then(|identifier| identifier.split('.').last())
+            .and_then(|identifier| identifier.split('.').next_back())
             .map(|id| {
                 custom_collections_ids
                     .iter()

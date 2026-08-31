@@ -1,0 +1,14 @@
+{
+  "MediaContainer": {
+    "Metadata": [{
+      "ratingKey": "captured-100",
+      "title": "Captured multi-version response",
+      "type": "movie",
+      "Media": [
+        {"id": 71, "videoResolution": "4k", "width": 3840, "height": 2160},
+        {"id": 72, "videoResolution": "720", "width": 1280, "height": 720},
+        {"id": 73, "videoResolution": "1080", "width": 1920, "height": 1080}
+      ]
+    }]
+  }
+}

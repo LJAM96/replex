@@ -66,7 +66,7 @@ impl ClientHeroStyle {
         let product = context.product.clone().unwrap_or_default();
         let device_type = DeviceType::from_context(&context);
         let platform = context.platform.clone().unwrap_or_default();
-        let platform_version =
+        let _platform_version =
             context.platform_version.clone().unwrap_or_default();
 
         match platform {
@@ -191,7 +191,7 @@ impl Transform for HubStyleTransform {
         plex_client: PlexClient,
         options: PlexContext,
     ) {
-        let style = item.style.clone().unwrap_or("".to_string()).to_owned();
+        let _style = item.style.clone().unwrap_or("".to_string()).to_owned();
 
         if item.is_hub() {
             // TODO: Check why tries to load non existing collectiin? my guess is no access

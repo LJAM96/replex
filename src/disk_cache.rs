@@ -335,7 +335,7 @@ pub async fn init() {
     let _ = tokio::fs::create_dir_all(&dir).await;
     // Reconcile the tracked size from disk on a blocking thread so startup
     // never stalls the async runtime on a large existing cache.
-    let total: u64 = match tokio::task::spawn_blocking(move || {
+    let total: u64 = tokio::task::spawn_blocking(move || {
         let mut total: u64 = 0;
         for entry in walkdir::WalkDir::new(&dir)
             .into_iter()
@@ -356,11 +356,39 @@ pub async fn init() {
         total
     })
     .await
-    {
-        Ok(t) => t,
-        Err(_) => 0,
-    };
+    .unwrap_or_default();
     CURRENT_SIZE.store(total, Ordering::Relaxed);
+}
+
+pub fn current_size() -> u64 {
+    CURRENT_SIZE.load(Ordering::Relaxed)
+}
+
+/// Clear only files inside the configured Replex cache directory.
+pub async fn clear_all() -> std::io::Result<u64> {
+    let dir = cache_dir();
+    let removed = tokio::task::spawn_blocking(move || {
+        let mut removed = 0u64;
+        if !dir.exists() {
+            return Ok(removed);
+        }
+        for entry in walkdir::WalkDir::new(&dir)
+            .min_depth(1)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if entry.file_type().is_file()
+                && std::fs::remove_file(entry.path()).is_ok()
+            {
+                removed += 1;
+            }
+        }
+        Ok::<u64, std::io::Error>(removed)
+    })
+    .await
+    .map_err(std::io::Error::other)??;
+    CURRENT_SIZE.store(0, Ordering::Relaxed);
+    Ok(removed)
 }
 
 #[cfg(test)]

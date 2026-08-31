@@ -12,8 +12,8 @@ impl Transform for HubKeyTransform {
     async fn transform_metadata(
         &self,
         item: &mut MetaData,
-        plex_client: PlexClient,
-        options: PlexContext,
+        _plex_client: PlexClient,
+        _options: PlexContext,
     ) {
         if item.is_hub()
             && item

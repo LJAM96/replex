@@ -134,6 +134,11 @@ pub struct Config {
     )]
     pub redirect_streams: bool,
     pub redirect_streams_host: Option<String>,
+    /// Additional Plex base URLs that may be selected through an encoded
+    /// `<base32>.replex.stream` host. The primary and redirect hosts are
+    /// always allowed. Comma separated.
+    #[serde(default, deserialize_with = "deserialize_comma_seperated_string")]
+    pub allowed_upstream_hosts: Option<Vec<String>>,
     #[serde(
         default = "default_as_false",
         deserialize_with = "figment::util::bool_from_str_or_int"
@@ -218,6 +223,53 @@ impl Config {
             .clone()
             .unwrap_or_else(|| "https://plex.tv".to_string())
     }
+
+    /// Whether a decoded dynamic upstream is an administrator-approved Plex
+    /// origin. Exact normalized base-URL matching prevents request Host data
+    /// from turning Replex into a credential-forwarding proxy.
+    pub fn allows_upstream_host(&self, candidate: &str) -> bool {
+        upstream_matches_allowlist(
+            candidate,
+            self.host
+                .iter()
+                .chain(self.redirect_streams_host.iter())
+                .chain(
+                    self.allowed_upstream_hosts
+                        .iter()
+                        .flat_map(|hosts| hosts.iter()),
+                )
+                .map(String::as_str),
+        )
+    }
+}
+
+fn upstream_matches_allowlist<'a>(
+    candidate: &str,
+    allowed: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    let Some(candidate) = normalize_base_url(candidate) else {
+        return false;
+    };
+    allowed
+        .into_iter()
+        .filter_map(normalize_base_url)
+        .any(|allowed| allowed == candidate)
+}
+
+fn normalize_base_url(value: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(value).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    while parsed.path().len() > 1 && parsed.path().ends_with('/') {
+        let path = parsed.path().trim_end_matches('/').to_string();
+        parsed.set_path(&path);
+    }
+    Some(parsed.to_string().trim_end_matches('/').to_string())
 }
 
 fn deserialize_json_map<'de, D, T>(
@@ -251,6 +303,9 @@ impl Config {
 
         if let Some(host) = self.redirect_streams_host.as_deref() {
             validate_base_url("REPLEX_REDIRECT_STREAMS_HOST", host)?;
+        }
+        for host in self.allowed_upstream_hosts.as_deref().unwrap_or(&[]) {
+            validate_base_url("REPLEX_ALLOWED_UPSTREAM_HOSTS", host)?;
         }
         if let Some(base) = self.identity_api_base.as_deref() {
             validate_base_url("REPLEX_IDENTITY_API_BASE", base)?;
@@ -455,56 +510,36 @@ fn default_as_true() -> bool {
     true
 }
 
-fn deserialize_hosr() -> bool {
-    true
-}
-
 impl Config {
     // Note the `nested` option on both `file` providers. This makes each
     // top-level dictionary act as a profile.
     pub fn figment() -> Figment {
         Figment::new().merge(Env::prefixed("REPLEX_"))
     }
+}
 
-    pub fn dynamic(req: &salvo::Request) -> Figment {
-        let mut config = Config::figment();
-        // Every header/param is treated as potentially hostile or malformed.
-        // Any failure here simply means "no replex.stream host override" — we
-        // must never panic on a client-supplied value.
-        let host = match req.headers().get("HOST").and_then(|v| v.to_str().ok())
-        {
-            Some(h) => h,
-            None => return config,
-        };
-        if host.contains("replex.stream") {
-            use data_encoding::BASE32;
-            let val: Vec<&str> = host.split(".replex.stream").collect();
-            let owned_val = match val.first() {
-                Some(v) => v.to_ascii_uppercase(),
-                None => return config,
-            };
-            let Ok(decoded_len) = BASE32.decode_len(owned_val.len()) else {
-                return config;
-            };
-            let mut output = vec![0u8; decoded_len];
-            let Ok(len) = BASE32.decode_mut(owned_val.as_bytes(), &mut output)
-            else {
-                return config;
-            };
-            if len == 0 {
-                return config;
-            }
-            match std::str::from_utf8(&output[0..len]) {
-                Ok(host_value) => {
-                    config = config.join(("host", host_value));
-                }
-                Err(_) => return config,
-            }
-        }
-        config
-        // Figment::new().merge(Env::prefixed("REPLEX_"))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_upstream_requires_an_exact_normalized_allowlist_match() {
+        let allowed = ["http://plex.local:32400/", "https://remote.example"];
+        assert!(upstream_matches_allowlist(
+            "http://plex.local:32400",
+            allowed
+        ));
+        assert!(upstream_matches_allowlist(
+            "https://remote.example/",
+            allowed
+        ));
+        assert!(!upstream_matches_allowlist(
+            "http://attacker.invalid",
+            allowed
+        ));
+        assert!(!upstream_matches_allowlist(
+            "http://plex.local:32400@attacker.invalid",
+            allowed
+        ));
     }
-    // pub fn default() -> Self {
-    //     Config { include_watched: false}
-    // }
 }

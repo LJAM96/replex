@@ -45,14 +45,6 @@ pub(crate) async fn track_fetched(cache_key: String) {
     HUB_FETCHED_AT.insert(cache_key, Instant::now()).await;
 }
 
-/// Short hash of a token used as the user-scope component of cache keys.
-/// Raw tokens never appear in cache keys.
-fn hub_user_scope(token: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(token.as_bytes());
-    data_encoding::HEXLOWER.encode(&digest)[..16].to_string()
-}
-
 /// Build the canonical hub cache key for a request path.
 ///
 /// Every hub embeds a hash of the requesting token so each account reads only
@@ -64,7 +56,11 @@ fn hub_user_scope(token: &str) -> String {
 /// land where the matching requests look them up.
 pub fn hub_cache_key(key_path: &str, token: Option<&str>) -> String {
     match token {
-        Some(t) => format!("hubcache:u:{}:{}", hub_user_scope(t), key_path),
+        Some(t) => format!(
+            "hubcache:u:{}:{}",
+            crate::account_scope::token_scope(Some(t)),
+            key_path
+        ),
         None => format!("hubcache:u:anon:{key_path}"),
     }
 }
@@ -316,14 +312,14 @@ async fn warm_cycle(state: &AppState) {
     if config.warm_interval == 0 {
         return;
     }
-    let tokens = warm_token_list(&config);
+    let tokens = warm_token_list(config);
     if tokens.is_empty() {
         tracing::debug!("warmer idle: no tokens configured");
         return;
     }
     for token in &tokens {
         tracing::debug!(
-            scope = %hub_user_scope(token),
+            scope = %crate::account_scope::token_scope(Some(token)),
             "warmer cycle for account scope"
         );
         // Library sharing is account-specific, so discover the hub paths with
@@ -515,7 +511,7 @@ async fn warm_library_pages(client: &PlexClient, token: &str) {
             // library payloads embed per-account watch state and must never
             // be shared across accounts.
             let cache_key =
-                crate::routes::library_cache_key_for(&path, Some(&token));
+                crate::routes::library_cache_key_for(&path, Some(token));
             if crate::disk_cache::get(&cache_key).await.is_some() {
                 continue;
             }
@@ -562,13 +558,17 @@ fn build_transcode_query(thumb: &str) -> Option<String> {
 
 /// Start the background warmer loop. Runs forever; call once at startup.
 pub fn spawn_warmer(state: Arc<AppState>) {
+    if state.config.warm_interval == 0 {
+        tracing::info!("Background hub warming is disabled");
+        return;
+    }
     tokio::spawn(async move {
         // Give the server a moment to bind before spending upstream time.
         tokio::time::sleep(Duration::from_secs(5)).await;
         loop {
             warm_cycle(&state).await;
-            let interval = state.config.warm_interval.max(1);
-            tokio::time::sleep(Duration::from_secs(interval)).await;
+            tokio::time::sleep(Duration::from_secs(state.config.warm_interval))
+                .await;
         }
     });
 }

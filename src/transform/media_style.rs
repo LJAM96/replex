@@ -14,6 +14,18 @@ fn upsert_cover_art(images: &mut Vec<Image>, title: &str, cover_art: &str) {
     {
         image.url = cover_art.to_string();
         image.alt = Some(title.to_string());
+        let mut kept_cover_art = false;
+        images.retain(|image| {
+            if image.r#type != "coverArt" {
+                return true;
+            }
+            if kept_cover_art {
+                false
+            } else {
+                kept_cover_art = true;
+                true
+            }
+        });
         return;
     }
 
@@ -29,8 +41,8 @@ impl Transform for MediaStyleTransform {
     async fn transform_mediacontainer(
         &self,
         mut item: MediaContainer,
-        plex_client: PlexClient,
-        options: PlexContext,
+        _plex_client: PlexClient,
+        _options: PlexContext,
     ) -> MediaContainer {
         if self.style == Style::Hero {
             item.meta = Some(hero_meta());
@@ -41,7 +53,7 @@ impl Transform for MediaStyleTransform {
     async fn transform_metadata(
         &self,
         item: &mut MetaData,
-        plex_client: PlexClient,
+        _plex_client: PlexClient,
         options: PlexContext,
     ) {
         if self.style == Style::Hero {
@@ -156,6 +168,11 @@ mod tests {
                 r#type: "coverArt".to_string(),
                 url: "/old-hero".to_string(),
                 alt: Some("Old".to_string()),
+            },
+            Image {
+                r#type: "coverArt".to_string(),
+                url: "/duplicate-old-hero".to_string(),
+                alt: Some("Duplicate".to_string()),
             },
             Image {
                 r#type: "backgroundSquare".to_string(),

@@ -3,7 +3,6 @@ use anyhow::Result;
 extern crate mime;
 use itertools::Itertools;
 // use futures_util::StreamExt;
-use crate::config::Config;
 use crate::state::AppState;
 use mime::Mime;
 use multimap::MultiMap;
@@ -16,7 +15,6 @@ use strum_macros::EnumString;
 // use http_body::{Limited, Full};
 use http_body_util::BodyExt;
 use percent_encoding::{utf8_percent_encode, CONTROLS};
-use tokio::time::Duration;
 use url::Url;
 use yaserde::ser::to_string as to_xml_str;
 // use salvo_core::http::response::Response as SalvoResponse;
@@ -24,8 +22,7 @@ use salvo::http::HeaderValue;
 
 use salvo::http::HeaderMap;
 use salvo::{
-    test::ResponseExt, Extractible, Request as SalvoRequest,
-    Response as SalvoResponse,
+    test::ResponseExt, Request as SalvoRequest, Response as SalvoResponse,
 };
 
 use crate::models::*;
@@ -73,12 +70,10 @@ pub fn proxy(
 /// matching route is gated with `#[cfg(debug_assertions)]` in `routes.rs`.
 #[cfg(debug_assertions)]
 pub fn test_proxy(upstream: String) -> Proxy<String, ReqwestClient> {
-    let mut proxy = Proxy::new(
+    Proxy::new(
         upstream,
         ReqwestClient::new(reqwest::Client::builder().build().unwrap()),
-    );
-
-    proxy
+    )
 }
 
 /// Encode url path. This can be used when build your custom url path getter.
@@ -100,19 +95,19 @@ pub fn get_collection_id_from_hub(hub: &MetaData) -> Option<i32> {
     hub.hub_identifier
         .as_deref()?
         .split('.')
-        .last()?
+        .next_back()?
         .parse()
         .ok()
 }
 
 pub fn replace_query(query: MultiMap<String, String>, req: &mut SalvoRequest) {
     let Ok(mut url) = Url::parse(req.uri().to_string().as_str()) else {
-        tracing::debug!(uri = %req.uri(), "Ignoring query replacement for malformed URI");
+        tracing::debug!(path = %req.uri().path(), "Ignoring query replacement for malformed URI");
         return;
     };
     url.query_pairs_mut()
         .clear()
-        .extend_pairs(&query.iter().map(|(k, v)| (k, v)).collect_vec());
+        .extend_pairs(&query.iter().collect_vec());
     if let Ok(uri) = hyper::Uri::try_from(url.as_str()) {
         req.set_uri(uri);
     }
@@ -129,12 +124,12 @@ pub fn add_query_param_salvo(
     // let mut uri =
     //     pathetic::Uri::new(req.uri_mut().to_string().as_str()).unwrap();
     let Ok(mut url) = Url::parse(req.uri().to_string().as_str()) else {
-        tracing::debug!(uri = %req.uri(), "Ignoring query update for malformed URI");
+        tracing::debug!(path = %req.uri().path(), "Ignoring query update for malformed URI");
         return;
     };
     let mut query: Vec<(String, String)> = url // remove existing values
         .query_pairs()
-        .filter(|(name, _)| name.to_string() != param.to_string())
+        .filter(|(name, _)| *name != param)
         .map(|(name, value)| (name.into_owned(), value.into_owned()))
         .collect();
     query.push((param.to_owned(), value.to_owned()));
@@ -149,7 +144,15 @@ pub fn add_query_param_salvo(
 }
 
 #[derive(
-    Debug, Clone, PartialEq, Eq, EnumString, EnumDisplay, Serialize, Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    EnumString,
+    EnumDisplay,
+    Serialize,
+    Deserialize,
+    Default,
 )]
 pub enum ContentType {
     #[strum(serialize = "application/json", serialize = "text/json")]
@@ -158,13 +161,8 @@ pub enum ContentType {
         serialize = "text/xml;charset=utf-8",
         serialize = "application/xml"
     )]
+    #[default]
     Xml,
-}
-
-impl Default for ContentType {
-    fn default() -> Self {
-        ContentType::Xml
-    }
 }
 
 pub fn get_content_type_from_headers(
@@ -236,7 +234,7 @@ pub async fn from_reqwest_response(
 }
 
 pub async fn from_reqwest_response_mut(
-    mut res: reqwest::Response,
+    res: reqwest::Response,
 ) -> Result<MediaContainerWrapper<MediaContainer>, Error> {
     let bytes = res.bytes().await.map_err(Error::other)?;
     from_bytes(bytes)

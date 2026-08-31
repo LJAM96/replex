@@ -13,7 +13,7 @@ impl Transform for HubInterleaveTransform {
         &self,
         mut item: MediaContainer,
         plex_client: PlexClient,
-        options: PlexContext,
+        _options: PlexContext,
     ) -> MediaContainer {
         let config = &plex_client.config;
         let mut new_hubs: Vec<MetaData> = vec![];

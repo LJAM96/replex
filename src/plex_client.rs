@@ -13,11 +13,7 @@ use std::sync::Arc;
 use crate::cache::GLOBAL_CACHE;
 use async_recursion::async_recursion;
 use futures_util::Future;
-use futures_util::TryStreamExt;
 use http::header::ACCEPT_LANGUAGE;
-use http::header::CONNECTION;
-use http::header::COOKIE;
-use http::header::FORWARDED;
 use http::HeaderMap;
 use http::Uri;
 // use hyper::client::HttpConnector;
@@ -26,7 +22,6 @@ use moka::future::Cache;
 //use moka::future::ConcurrentCacheExt;
 use reqwest::header;
 use reqwest::header::ACCEPT;
-use reqwest_retry::{default_on_request_failure, Retryable, RetryableStrategy};
 use salvo::Error;
 use salvo::Request;
 // use hyper::client::HttpConnector;
@@ -83,30 +78,6 @@ pub enum IdentityError {
     Upstream(#[from] anyhow::Error),
 }
 
-/// Hash a token for cache keying so raw tokens never sit in cache keys.
-fn hash_token(token: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(token.as_bytes());
-    data_encoding::HEXLOWER.encode(&digest)
-}
-
-struct Retry401;
-impl RetryableStrategy for Retry401 {
-    fn handle(
-        &self,
-        res: &std::result::Result<reqwest::Response, reqwest_middleware::Error>,
-    ) -> Option<Retryable> {
-        match res {
-            Ok(success) if success.status() == 401 => {
-                Some(Retryable::Transient)
-            }
-            Ok(success) => None,
-            // otherwise do not retry a successful request
-            Err(error) => default_on_request_failure(error),
-        }
-    }
-}
-
 /// TODO: Implement clone
 #[derive(Debug, Clone)]
 pub struct PlexClient {
@@ -119,6 +90,7 @@ pub struct PlexClient {
     pub identity_cache: Cache<String, ResolvedIdentity>,
     pub part_media_cache: Cache<i64, PartMediaClassification>,
     pub server_machine_ids: Cache<String, String>,
+    pub policy: crate::policy_store::PolicyStore,
     pub security_context: Option<Arc<RequestSecurityContext>>,
     pub security_unavailable_fail_closed: Option<bool>,
     pub default_headers: header::HeaderMap,
@@ -150,7 +122,7 @@ impl PlexClient {
             .build()
             .map_err(Error::other)?;
         req.set_uri(uri);
-        self.request(&mut req).await
+        self.request(&req).await
     }
 
     pub async fn request(
@@ -342,7 +314,7 @@ impl PlexClient {
 
     pub async fn get_hubs(
         &self,
-        id: i32,
+        _id: i32,
     ) -> Result<MediaContainerWrapper<MediaContainer>> {
         let res = self.get("/hubs".to_string()).await?;
         if !res.status().is_success() {
@@ -397,7 +369,7 @@ impl PlexClient {
             .clone()
             .ok_or(IdentityError::MissingToken)?;
 
-        let cache_key = hash_token(&token);
+        let cache_key = crate::account_scope::token_fingerprint(&token);
 
         if let Some(resolved) = self.identity_cache.get(&cache_key).await {
             tracing::debug!(
@@ -500,7 +472,8 @@ impl PlexClient {
                 // administrator configured SHA256 fingerprint. The raw token
                 // never enters configuration, logs, cache keys or the
                 // resulting identity.
-                let fingerprint = hash_token(token);
+                let fingerprint =
+                    crate::account_scope::token_fingerprint(token);
                 if let Some(binding) =
                     config.token_identity_map.get(&fingerprint)
                 {
@@ -690,8 +663,8 @@ impl PlexClient {
             source_title: Option<String>,
             #[serde(default)]
             owner_id: Option<i64>,
-            #[serde(default)]
-            access_token: Option<String>,
+            #[serde(default, rename = "accessToken")]
+            _access_token: Option<String>,
         }
 
         let resources: Vec<RawResource> = res.json().await.map_err(|e| {
@@ -947,12 +920,12 @@ impl PlexClient {
                         "Problem loading provider metadata."
                     );
                     return None;
-                    MediaContainerWrapper::default()
                 }
             };
 
         let mut image: Option<String> = None;
-        if let Some(metadata) = container.media_container.children_mut().first() {
+        if let Some(metadata) = container.media_container.children_mut().first()
+        {
             for i in &metadata.images {
                 if i.r#type == "coverArt" {
                     image = Some(i.url.clone());
@@ -1053,11 +1026,11 @@ impl PlexClient {
         state: &AppState,
     ) -> Result<Self, anyhow::Error> {
         let config = state.config.clone();
-        let token = context
+        let _token = context
             .token
             .clone()
             .ok_or_else(|| anyhow::anyhow!("missing Plex token on request"))?;
-        let client_identifier = context.client_identifier.clone();
+        let _client_identifier = context.client_identifier.clone();
         let platform = context.platform.clone().unwrap_or_default();
 
         let mut headers = header::HeaderMap::new();
@@ -1095,14 +1068,14 @@ impl PlexClient {
             ),
             ("X-Forwarded-For", context.forwarded_for.clone()),
             ("X-Real-Ip", context.real_ip.clone()),
-            (&ACCEPT.as_str(), Some("application/json".to_string())),
-            (&ACCEPT_LANGUAGE.as_str(), Some("en-US".to_string())),
+            (ACCEPT.as_str(), Some("application/json".to_string())),
+            (ACCEPT_LANGUAGE.as_str(), Some("en-US".to_string())),
         ]);
 
         for (key, val) in headers_map {
             if let Some(v) = val {
                 if let Ok(hv) = header::HeaderValue::from_str(&v) {
-                    headers.insert(key.clone(), hv);
+                    headers.insert(key, hv);
                 }
             }
         }
@@ -1120,6 +1093,7 @@ impl PlexClient {
             identity_cache: state.identity_cache.clone(),
             part_media_cache: state.part_media_cache.clone(),
             server_machine_ids: state.server_machine_ids.clone(),
+            policy: state.policy.clone(),
             security_context: None,
             security_unavailable_fail_closed: None,
         })

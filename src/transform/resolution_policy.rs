@@ -22,8 +22,8 @@ impl ResolutionPolicyTransform {
     async fn current_policy(
         plex_client: &PlexClient,
     ) -> Result<(ResolutionPolicy, UserIdentity), ()> {
-        let config = &plex_client.config;
-        if !config.resolution_policy_enabled {
+        let runtime = plex_client.policy.snapshot().await;
+        if !runtime.enabled {
             return Ok((
                 ResolutionPolicy::unrestricted(),
                 // Unused when the policy feature is disabled.
@@ -54,9 +54,9 @@ impl ResolutionPolicyTransform {
             .identity;
 
         let policy = resolve_policy(
-            &config.user_resolution_policies,
-            config.resolution_default,
-            config.hidden_collections.as_deref().unwrap_or(&[]),
+            &runtime.entries,
+            runtime.default_limit,
+            &runtime.hidden_collections,
             &identity,
         );
         Ok((policy, identity))
@@ -71,12 +71,12 @@ impl Transform for ResolutionPolicyTransform {
         plex_client: PlexClient,
         _options: PlexContext,
     ) {
-        let (policy, identity) = match Self::current_policy(&plex_client).await
+        let (policy, _identity) = match Self::current_policy(&plex_client).await
         {
             Ok((policy, identity)) => (policy, identity),
             Err(_) => {
                 // Fail closed: strip every version so nothing playable leaks.
-                if plex_client.config.resolution_policy_fail_closed {
+                if plex_client.policy.snapshot().await.fail_closed {
                     clear_media_recursive(item);
                 }
                 return;
@@ -118,7 +118,7 @@ impl Transform for ResolutionPolicyTransform {
         {
             Ok((policy, identity)) => (policy, identity),
             Err(_) => {
-                if plex_client.config.resolution_policy_fail_closed
+                if plex_client.policy.snapshot().await.fail_closed
                     && !item.media.is_empty()
                 {
                     tracing::warn!(
@@ -269,6 +269,7 @@ impl Transform for CollectionVisibilityTransform {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::resolution_policy::{ResolutionLimit, ResolutionPolicy};

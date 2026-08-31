@@ -28,6 +28,7 @@ pub(crate) fn pin_default_env(mock_host: &str) -> MutexGuard<'static, ()> {
         "REPLEX_NTF_WATCHLIST_FORCE",
         "REPLEX_DISABLE_CONTINUE_WATCHING",
         "REPLEX_REDIRECT_STREAMS",
+        "REPLEX_ALLOWED_UPSTREAM_HOSTS",
         "REPLEX_HERO_ROWS",
         "REPLEX_HIDDEN_COLLECTIONS",
         // Per-account policies and the identity endpoint are process-global;

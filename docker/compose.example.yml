@@ -1,29 +1,50 @@
-version: "3"
 services:
   plex:
     image: lscr.io/linuxserver/plex:latest
     container_name: plex
     environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Etc/UTC
-      - VERSION=docker
-      # claim from https://plex.tv/claim 
-      - PLEX_CLAIM=
-    ports:
-      - 32400:32400
-    # volumes:
-    #   - /path/to/library:/config
-    #   - /path/to/tvseries:/tv
-    #   - /path/to/movies:/movies
+      PUID: 1000
+      PGID: 1000
+      TZ: Etc/UTC
+      VERSION: docker
+      PLEX_CLAIM: ""
+    volumes:
+      - /path/to/plex-config:/config
+      - /path/to/tv:/tv
+      - /path/to/movies:/movies
     restart: unless-stopped
+
   replex:
     image: ghcr.io/sarendsen/replex:latest
     container_name: replex
     environment:
+      # Required Plex API origin.
       REPLEX_HOST: http://plex:32400
+
+      # Recommended for identity, hero art, warming, and admin APIs.
+      REPLEX_TOKEN: "replace-with-server-owner-token"
+
+      # Presentation defaults.
+      REPLEX_INTERLEAVE: "true"
+      REPLEX_HUB_RESTRICTIONS: "true"
+      REPLEX_EXCLUDE_WATCHED: "true"
+
+      # Cache freshness. Set warm interval to 0 to disable warming.
+      REPLEX_CACHE_TTL: "1800"
+      REPLEX_HUB_STALE_TTL: "300"
+      REPLEX_WARM_INTERVAL: "300"
+      REPLEX_DISK_CACHE_MAX_GB: "45"
+
+      # Restricted streams always remain behind Replex.
+      REPLEX_REDIRECT_STREAMS: "false"
+      RUST_LOG: info
     ports:
-      - 3001:80
-    restart: unless-stopped
+      - "3001:80"
+    volumes:
+      - replex-cache:/data/replex-cache
     depends_on:
       - plex
+    restart: unless-stopped
+
+volumes:
+  replex-cache:

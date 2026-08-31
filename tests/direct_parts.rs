@@ -1,7 +1,24 @@
 use httpmock::prelude::*;
+use moka::future::Cache;
+use replex::config::Config;
+use replex::plex_client::PartMediaClassification;
+use replex::state::AppState;
 use salvo::http::StatusCode;
 use salvo::test::TestClient;
 use salvo::Service;
+use std::sync::Arc;
+
+fn service_with_part_cache(
+    part_media_cache: Cache<i64, PartMediaClassification>,
+) -> Service {
+    let config: Config = Config::figment()
+        .extract()
+        .expect("test configuration should be valid");
+    let mut state =
+        AppState::new(config).expect("test application state should be valid");
+    state.part_media_cache = part_media_cache;
+    Service::new(replex::routes::route_with_state(Arc::new(state)))
+}
 
 /// Direct /library/parts protection scenarios, run sequentially because they
 /// share env vars and the global part-classification cache.
@@ -110,7 +127,14 @@ async fn direct_part_protection_scenarios() {
         }));
     }
 
-    let service = Service::new(replex::routes::route());
+    let initial_config: Config = Config::figment()
+        .extract()
+        .expect("test configuration should be valid");
+    let initial_state = AppState::new(initial_config)
+        .expect("test application state should be valid");
+    let part_media_cache = initial_state.part_media_cache.clone();
+    let mut service =
+        Service::new(replex::routes::route_with_state(Arc::new(initial_state)));
 
     async fn get_status(
         service: &Service,
@@ -225,6 +249,7 @@ async fn direct_part_protection_scenarios() {
 
     // --- unrestricted account obeys redirect=false and proxies ---
     std::env::set_var("REPLEX_REDIRECT_STREAMS", "false");
+    service = service_with_part_cache(part_media_cache.clone());
     let status =
         get_status(&service, "/library/parts/2/222/file.mkv", "admin-token")
             .await;
@@ -234,6 +259,7 @@ async fn direct_part_protection_scenarios() {
         "unrestricted account must proxy when redirects are disabled"
     );
     std::env::set_var("REPLEX_REDIRECT_STREAMS", "true");
+    service = service_with_part_cache(part_media_cache.clone());
 
     // --- unknown parts are always rejected for restricted accounts ---
     let status =
@@ -251,6 +277,7 @@ async fn direct_part_protection_scenarios() {
         "REPLEX_USER_RESOLUTION_POLICIES",
         r#"[{"username": "jodiemy3", "max_resolution": "4k"}]"#,
     );
+    service = service_with_part_cache(part_media_cache.clone());
     let status =
         get_status(&service, "/library/parts/2/222/file.mkv", "jodie-token")
             .await;
@@ -264,6 +291,7 @@ async fn direct_part_protection_scenarios() {
         r#"[{"username": "jodiemy3", "max_resolution": "1080"},
             {"username": "capped-only", "max_resolution": "unlimited", "max_bitrate": 8000}]"#,
     );
+    service = service_with_part_cache(part_media_cache.clone());
 
     // --- transcode session route: restricted user is proxied ---
     let status = get_status(
@@ -282,6 +310,7 @@ async fn direct_part_protection_scenarios() {
     // configured transport mode.
     std::env::set_var("REPLEX_RESOLUTION_POLICY_FAIL_CLOSED", "false");
     std::env::set_var("REPLEX_REDIRECT_STREAMS", "true");
+    service = service_with_part_cache(part_media_cache.clone());
     let status =
         get_status(&service, "/library/parts/9/999/file.mkv", "expired-token")
             .await;
@@ -292,6 +321,7 @@ async fn direct_part_protection_scenarios() {
     );
 
     std::env::set_var("REPLEX_REDIRECT_STREAMS", "false");
+    service = service_with_part_cache(part_media_cache);
     let status =
         get_status(&service, "/library/parts/9/999/file.mkv", "expired-token")
             .await;

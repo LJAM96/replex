@@ -6,7 +6,6 @@ use crate::resolution_policy::{
 use crate::state;
 use data_encoding::BASE32;
 use salvo::{async_trait, Depot, FlowCtrl, Handler, Request, Response};
-use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -48,16 +47,6 @@ pub fn security_state(depot: &Depot) -> Option<SecurityContextState> {
         .get::<SecurityContextState>(SECURITY_CONTEXT_KEY)
         .ok()
         .cloned()
-}
-
-fn token_scope(token: Option<&str>) -> String {
-    match token {
-        Some(token) => {
-            let digest = Sha256::digest(token.as_bytes());
-            data_encoding::HEXLOWER.encode(&digest)[..16].to_string()
-        }
-        None => "anon".to_string(),
-    }
 }
 
 fn decoded_replex_stream_host(req: &Request) -> Option<String> {
@@ -121,7 +110,21 @@ impl Handler for RequestContextMiddleware {
         };
 
         let plex = req.extract::<PlexContext>().await.unwrap_or_default();
-        let upstream_host = decoded_replex_stream_host(req)
+        let decoded_host = decoded_replex_stream_host(req);
+        if let Some(ref candidate) = decoded_host {
+            if !state.config.allows_upstream_host(candidate) {
+                tracing::warn!(
+                    request_host = %req.headers().get("HOST")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("invalid"),
+                    "rejected unapproved dynamic Plex upstream"
+                );
+                res.status_code(salvo::http::StatusCode::BAD_REQUEST);
+                ctrl.skip_rest();
+                return;
+            }
+        }
+        let upstream_host = decoded_host
             .or_else(|| state.config.host.clone())
             .unwrap_or_default();
         let request_id = format!(
@@ -129,7 +132,9 @@ impl Handler for RequestContextMiddleware {
             REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
         let context = Arc::new(RequestContext {
-            token_scope: token_scope(plex.token.as_deref()),
+            token_scope: crate::account_scope::token_scope(
+                plex.token.as_deref(),
+            ),
             plex,
             upstream_host,
             request_id,
@@ -170,8 +175,8 @@ impl Handler for SecurityContextMiddleware {
             }
         };
 
-        if state.config.resolution_policy_enabled
-            && requires_security_context(req.uri().path())
+        let runtime_policy = state.policy.snapshot().await;
+        if runtime_policy.enabled && requires_security_context(req.uri().path())
         {
             let result =
                 PlexClient::from_context_with_state(&request.plex, &state).map(
@@ -184,13 +189,9 @@ impl Handler for SecurityContextMiddleware {
                 Ok(client) => match client.get_current_identity().await {
                     Ok(resolved) => {
                         let policy = resolve_policy(
-                            &state.config.user_resolution_policies,
-                            state.config.resolution_default,
-                            state
-                                .config
-                                .hidden_collections
-                                .as_deref()
-                                .unwrap_or(&[]),
+                            &runtime_policy.entries,
+                            runtime_policy.default_limit,
+                            &runtime_policy.hidden_collections,
                             &resolved.identity,
                         );
                         SecurityContextState::Resolved(Arc::new(
@@ -203,12 +204,12 @@ impl Handler for SecurityContextMiddleware {
                         ))
                     }
                     Err(error) => SecurityContextState::Unavailable {
-                        fail_closed: state.config.resolution_policy_fail_closed,
+                        fail_closed: runtime_policy.fail_closed,
                         reason: error.to_string(),
                     },
                 },
                 Err(error) => SecurityContextState::Unavailable {
-                    fail_closed: state.config.resolution_policy_fail_closed,
+                    fail_closed: runtime_policy.fail_closed,
                     reason: error.to_string(),
                 },
             };
@@ -238,8 +239,28 @@ mod tests {
     #[test]
     fn token_scope_never_contains_the_token() {
         let token = "secret-plex-token";
-        let scope = token_scope(Some(token));
+        let scope = crate::account_scope::token_scope(Some(token));
         assert_eq!(scope.len(), 16);
         assert!(!scope.contains(token));
+    }
+
+    #[test]
+    fn encoded_dynamic_host_decodes_only_to_a_candidate() {
+        let candidate = "http://attacker.invalid";
+        let encoded = BASE32.encode(candidate.as_bytes()).to_ascii_lowercase();
+        let mut request = Request::new();
+        request.headers_mut().insert(
+            "HOST",
+            format!("{encoded}.replex.stream").parse().unwrap(),
+        );
+        assert_eq!(
+            decoded_replex_stream_host(&request).as_deref(),
+            Some(candidate)
+        );
+        assert!(upstream_candidate_needs_configuration(candidate));
+    }
+
+    fn upstream_candidate_needs_configuration(candidate: &str) -> bool {
+        url::Url::parse(candidate).is_ok()
     }
 }

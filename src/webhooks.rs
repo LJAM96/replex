@@ -2,7 +2,7 @@
 // use serde_derive::Serialize;
 use serde::{Deserialize, Serialize};
 
-pub fn watchlist(payload: Payload) {}
+pub fn watchlist(_payload: Payload) {}
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

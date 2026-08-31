@@ -92,8 +92,7 @@ impl Expiry<CacheKey, (Expiration, Arc<Vec<u8>>)> for CacheExpiry {
         value: &(Expiration, Arc<Vec<u8>>),
         _current_time: Instant,
     ) -> Option<Duration> {
-        let duration = value.0.as_duration();
-        duration
+        value.0.as_duration()
     }
 }
 
@@ -469,7 +468,7 @@ where
             }
         };
 
-        /// request can be manipulated in handlers. So set this before handlers.
+        // Request can be manipulated in handlers, so capture this first.
         let req_headers = req.headers().clone();
         let req_uri = req.uri().clone();
         let req_method = req.method().clone();
@@ -512,10 +511,10 @@ where
             status,
             headers,
             body,
-            req_headers,
-            req_uri,
-            req_method,
-            req_local_addr,
+            req_headers: _,
+            req_uri: _,
+            req_method: _,
+            req_local_addr: _,
         } = cache;
         if let Some(status) = status {
             res.status_code(status);

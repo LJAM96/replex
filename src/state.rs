@@ -24,6 +24,9 @@ pub struct AppState {
     pub identity_cache: Cache<String, ResolvedIdentity>,
     pub part_media_cache: Cache<i64, PartMediaClassification>,
     pub server_machine_ids: Cache<String, String>,
+    pub metrics: Arc<crate::observability::Metrics>,
+    pub jobs: Arc<crate::jobs::JobSupervisor>,
+    pub policy: crate::policy_store::PolicyStore,
 }
 
 impl AppState {
@@ -74,6 +77,9 @@ impl AppState {
             .time_to_live(Duration::from_secs(config.identity_cache_ttl))
             .build();
         let server_machine_ids = Cache::builder().max_capacity(10).build();
+        let metrics = Arc::new(crate::observability::Metrics::default());
+        let jobs = Arc::new(crate::jobs::JobSupervisor::new(metrics.clone()));
+        let policy = crate::policy_store::PolicyStore::new(&config);
 
         crate::cache::configure_global_cache_ttl(config.cache_ttl);
 
@@ -87,6 +93,9 @@ impl AppState {
             identity_cache,
             part_media_cache,
             server_machine_ids,
+            metrics,
+            jobs,
+            policy,
         })
     }
 }

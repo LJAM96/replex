@@ -13,8 +13,8 @@ impl Transform for HubChildrenLimitTransform {
     async fn transform_metadata(
         &self,
         item: &mut MetaData,
-        plex_client: PlexClient,
-        options: PlexContext,
+        _plex_client: PlexClient,
+        _options: PlexContext,
     ) {
         let len = self.limit as usize;
         if item.is_collection_hub() {

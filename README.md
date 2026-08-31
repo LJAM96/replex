@@ -1,281 +1,128 @@
 # Replex
 
-Remix your plex hubs
+Replex is a policy-aware reverse proxy for Plex Media Server. It sits between Plex clients and Plex, transforms selected requests and responses, and proxies everything else unchanged.
 
-![plot](./examplewithhero.png)
+![Replex hero-style home screen](./examplewithhero.png)
 
-### Looking for maintainers
+## What Replex provides
 
-I moved away from Plex and therefore this project is in need of an maintainer.
+- Interleaved rows combining same-named collection hubs across libraries.
+- Shelf and client-aware hero styles, including custom hero artwork.
+- Watched-item, badge, episode-count, related-content, and Continue Watching controls.
+- Version selection, maximum-quality rewriting, direct-play preferences, and transcode fallback.
+- Per-account resolution, bitrate, and collection-visibility policies.
+- Account-isolated caches, stale-while-revalidate, and background warming.
+- Safe stream proxy/redirect controls for restricted and unrestricted accounts.
+- Readiness, metrics, cache administration, policy reload, and playback diagnostics.
+- Plex Web asset caching, webhooks, restricted CORS, TLS, and allowlisted multi-server routing.
 
-## Features
+See [Feature behavior](docs/FEATURES.md) for every feature and the order in which transformations run.
 
-- Merge hubs (recommended rows) from different libraries into a [single hub](./interleave.png) (interleave). Aka have movies and shows in a single row.
-- Choose between styles, [shelf](./shelf.png) (default) or [hero](./hero.png).
-- Remove watched items from hubs.
-- Auto load artwork for hero styles.
-- Filter hubs by its restrictions (per user hub)
-- Disable user state: remove watched badges from hub items.
-- Disable leaf count: remove episode count from artwork.
-- Force maximum quality.
-- Auto select version based on resolution of the client.
-- Fallback to different version if selected version is video transcoding.
-- Works on every client not only plex web!
-- Plays nice with PMM (and without).
+## How it works
 
-## How does it work
+```text
+Plex client
+    |
+    v
+Replex request context and account policy
+    |
+    +-- metadata/hubs --> account cache --> transforms --> client
+    +-- playback ------> policy and version selection --> Plex
+    +-- streams -------> proxy, or redirect when unrestricted
+    `-- other paths ---> transparent Plex proxy
+```
 
-Replex is an proxy that transforms the communication between the plex media server and plex clients. 
-This allows replex to change some dials that otherwise wouldnt be possible.
+Plex tokens are forwarded only to configured upstreams. Logs and cache keys use one-way token fingerprints instead of raw tokens.
 
-## Installation
+## Quick start with Docker Compose
 
-Docker compose example including plex:
-
-```yml
-version: "3"
+```yaml
 services:
   plex:
     image: lscr.io/linuxserver/plex:latest
     container_name: plex
     environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Etc/UTC
-      - VERSION=docker
-      # claim from https://plex.tv/claim 
-      - PLEX_CLAIM=
-    ports:
-      - 32400:32400
-     volumes:
-       - /path/to/library:/config
-       - /path/to/tvseries:/tv
-       - /path/to/movies:/movies
+      PUID: 1000
+      PGID: 1000
+      TZ: Etc/UTC
+      VERSION: docker
+      PLEX_CLAIM: ""
+    volumes:
+      - /path/to/plex-config:/config
+      - /path/to/tv:/tv
+      - /path/to/movies:/movies
     restart: unless-stopped
+
   replex:
-    image: ghcr.io/lostb1t/replex:latest
+    image: ghcr.io/sarendsen/replex:latest
     container_name: replex
     environment:
       REPLEX_HOST: http://plex:32400
-      REPLEX_TOKEN: ***** # server admin plex token: https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/
+      REPLEX_TOKEN: "your-server-owner-token"
+      RUST_LOG: info
     ports:
-      - 3001:80
-    restart: unless-stopped
+      - "3001:80"
+    volumes:
+      - replex-cache:/data/replex-cache
     depends_on:
       - plex
+    restart: unless-stopped
+
+volumes:
+  replex-cache:
 ```
 
-Add your proxy url to plex "Custom server access URLs" (ex http://0.0.0.0:3001)
-Then access your proxy url http://0.0.0.0:3001
+Then:
 
-Note: DO NOT run the plex container in host mode. It will cause plex to connect to the local ip instead of the custom url for
-local clients and bypass replex.
+1. Set Plex's **Settings → Network → Custom server access URLs** to the public Replex URL.
+2. Disable Plex GDM if clients discover the Plex origin directly.
+3. Clear old server connections from clients or clear their cache.
+4. Block restricted clients from reaching Plex directly when using policy enforcement.
 
-Note: Plex clients are a bit broken with custom urls and unsecured connections. Most wont work if the custom server url is not secure.
-So for testing the direct web client is fine but after that you want to setup SSL. See the "Remote access" section for more info.
+The maintained example is [docker/compose.example.yml](docker/compose.example.yml).
 
-## Settings
+## Essential configuration
 
-Settings are set via [environment variables](https://kinsta.com/knowledgebase/what-is-an-environment-variable/) 
-
-| Setting        	          | Default 	| Description                                                            	  |
-|---------------------------|----------|---------------------------------------------------------------------------|
-| REPLEX_HOST               |        	 | Url of your plex instance. ex: http://0.0.0.0:32400                                             	  |
-| REPLEX_TOKEN              |        	 | server admin plex token, needed for hero images. To find your token see: https://support.plex.tv/articles/204059436-finding-an-authentication                                      	  |
-| REPLEX_INTERLEAVE         | true      | Interleave home hubs. Collection hubs with the same name from different libraries are interleaved (combined) into one.                                           	  |
-| REPLEX_EXCLUDE_WATCHED    | true    | If set to true, hide watched items for hubs.                                    |
-| REPLEX_HUB_RESTRICTIONS   | true      | Apply collections restrictions to their hub's. Plex does not apply restrictions to hubs, so you cannot have different collection hubs for users. this fixes that.                                       	  |
-| REPLEX_DISABLE_CONTINUE_WATCHING | false    | Disable/remove the continue watching row |
-| REPLEX_DISABLE_USER_STATE | true    | Remove watched badges from hub items. * does not work on all clients |
-| REPLEX_DISABLE_LEAF_COUNT| false    | Remove episode count label from show artwork.                              |
-| REPLEX_HERO_ROWS          |        	 | Comma seperated list of hubidentifiers to make builtin hubs hero style. For custom collections see [Hhb style](#-hub-style).  Options are: <br />home.movies.recent<br />movies.recent <br />movie.recentlyadded<br />movie.topunwatched<br />movie.recentlyviewed<br />hub.movie.recentlyreleased<br />movie.recentlyreleased<br />home.television.recent<br />tv.recentlyadded<br />tv.toprated<br />tv.inprogress<br />tv.recentlyaired    |
-| REPLEX_FORCE_MAXIMUM_QUALITY    | false    | This will force clients to use the maximum quality. Meaning that if a client requests anything other then the maximum quality this will be ignored and the maximum quality (direct play/stream when server allows for original) is used instead. This doesn't prevent transcoding. It only sets the bitrate to original quality. So if a client needs a different codec, container or audio it should still transcode. 
-| REPLEX_FORCE_DIRECT_PLAY_FOR    | false    | Force direct play for the given resolutions. Options are "4k", "1080" and "720".  This wil result in an error message if the client does not support directplay. Not recommended      
-| REPLEX_VIDEO_TRANSCODE_FALLBACK_FOR    |     | If the selected media triggers a video transcode. Fallback to another version of the media. Only triggers on video transcoding. Remuxing is still allowed. <br />Options are "4k" and "1080". <br /> <br /> Example if  REPLEX_VIDEO_TRANSCODE_FALLBACK_FOR is set to "4k" then 4k transcodes will fallback to another version if avaiable |
-| REPLEX_AUTO_SELECT_VERSION    | false    | If you have multiple versions of a media item then this setting will choose the one thats closest to the client resolution. So a 1080p TV will get the 1080P version while 4k gets the 4k version. A user can still override this by selecting a different version from the client.   |
-| REPLEX_DISABLE_RELATED  | false | See: https://github.com/lostb1t/replex/issues/26.        |
-| REPLEX_REDIRECT_STREAMS  | false    | For **fully unrestricted** accounts, temporarily redirect stream bytes directly to the Plex origin (best performance). Accounts with a resolution or bitrate restriction are **always proxied through Replex** regardless of this setting, so their policy stays enforceable. Set `false` to proxy every stream. |
-| REPLEX_REDIRECT_STREAMS_HOST  | REPLEX_HOST    | Alternative streams endpoint                                         |
-| REPLEX_CACHE_TTL          | 1800    	 | Time to live for general caches in seconds. Set to 0 to disable (higly recommended to keep enabled besides testing purposes).  |
-| REPLEX_WARM_INTERVAL      | 300    	 | Seconds between background warmer cycles that pre-fetch hot hub payloads with the admin token so clients never pay the slow cold fetch. 0 disables warming.  |
-| REPLEX_WARM_TOKENS      |    	 | Comma separated list of extra Plex tokens to pre-warm. The warmer fetches each token's hubs/library into its own user-scoped cache scope, so accounts other than the configured admin also get cold-start-free loads. When empty, only `REPLEX_TOKEN` (admin) is warmed. |
-| REPLEX_HUB_STALE_TTL      | 300    	 | Hub payloads older than this (seconds) are served instantly while being refreshed in the background, so clients never wait on a slow upstream fetch. Playback changes seen through the proxy (scrobbles, playback stopping) mark all hubs stale immediately, keeping Continue Watching fresh within seconds. Set to 0 to disable the staleness layer.  |
-
-## Hub caching and freshness
-
-Hubs are served from a shared cache that all users read from. Responses are
-always instant: when a cached payload is past `REPLEX_HUB_STALE_TTL` it is
-still served while a background refresh updates it for the next request.
-When a client reports playback changes through the proxy (`/:/scrobble`,
-`/:/timeline` with state=stopped), all hub payloads are marked stale so the
-next request refreshes them — this keeps Continue Watching and On Deck
-accurate within seconds without ever blocking a client on the upstream
-Plex server, which can take many seconds (or worse) to regenerate promoted
-hubs.
-
-Optionally, if the server owner has Plex Pass, adding `http://<replex>/replex/webhooks`
-to the Plex webhooks settings marks the cache stale on Plex events too
-(useful for changes made outside the proxy; requires a publicly reachable URL).
-
-## Web UI asset caching
-
-Plex serves its static web files (`/web/*`) with `Cache-Control: no-cache` and
-no validators, forcing browsers to re-download all of them on every reload.
-Replex caches these immutable content-hashed files in memory and serves them
-with `Cache-Control: public, max-age=31536000, immutable`, so repeat loads of
-the web app skip the upstream round trip entirely (`index.html` and
-translations stay short-lived so app updates still propagate).
-
-
-## Per-user resolution restrictions
-
-Restrict individual Plex accounts to a maximum media resolution while keeping
-everything in one library. 1080p and 4K versions stay merged under the same
-item; restricted accounts simply never see or reach the versions above their
-limit.
-
-> **Intent: enforced by Replex, provided the Plex origin is isolated.** Restricted
-> accounts' streams are proxied through Replex and direct/unknown part requests
-> are blocked, so the limit holds for any client that talks to Plex *through*
-> Replex. It is still **not** a hard security boundary against a client that can
-> reach the Plex server directly: anyone with direct network access and an
-> accepted token can construct requests that bypass these restrictions. For hard
-> enforcement, firewall the Plex origin so only Replex can talk to it — Replex
-> alone cannot substitute for that network control.
+Only `REPLEX_HOST` is required. `REPLEX_TOKEN` is strongly recommended for owner identity, hero art, warming, and authenticated administration.
 
 ```text
-REPLEX_RESOLUTION_POLICY_ENABLED=true
-
-REPLEX_USER_RESOLUTION_POLICIES=[{"username": "jodie", "max_resolution": "1080"},
-                                 {"username": "luke", "max_resolution": "4k"}]
-
-REPLEX_RESOLUTION_DEFAULT=unlimited
-REPLEX_RESOLUTION_POLICY_FAIL_CLOSED=true
+REPLEX_HOST=http://plex:32400
+REPLEX_TOKEN=<server-owner Plex token>
+REPLEX_PORT=80
 ```
 
-| Setting | Default | Description |
-|---|---|---|
-| REPLEX_RESOLUTION_POLICY_ENABLED | false | Master switch. When false, behaviour is identical to stock Replex and the metadata routes are not even registered. |
-| REPLEX_USER_RESOLUTION_POLICIES | | JSON array of per-account rules. Each entry needs `username` and/or `uuid` plus `max_resolution` (`480`, `720`, `1080`, `4k`, `unlimited`). Optional `max_bitrate` (kbps) caps playback bitrate for that account — it applies even when the resolution is `unlimited`, and requests above the cap are lowered while lower requests are left alone. Optional `visible_collections` lists collection titles this account can see despite the global hidden default — everyone else has them hidden. UUID is the stable identifier (visible in server logs at identity resolution time); username matching is case sensitive. |
-| REPLEX_RESOLUTION_DEFAULT | unlimited | Limit applied to accounts without an explicit rule. |
-| REPLEX_RESOLUTION_POLICY_FAIL_CLOSED | true | If the account identity cannot be verified (plex.tv unreachable, invalid token) playback requests fail with 503 instead of being allowed unrestricted. Cached identities mean brief plex.tv outages are invisible. |
-| REPLEX_HIDDEN_COLLECTIONS | | Comma separated list of collection titles hidden from **all** accounts. Accounts with a matching `visible_collections` entry in their policy see them normally. Exact title match (case sensitive, emoji included). |
-| REPLEX_TOKEN_IDENTITY_MAP | | Preferred fallback for Plex tokens that the Plex account APIs cannot identify. JSON object keyed by the lowercase SHA256 fingerprint of the raw Plex token. Each value may be a username string, or an object containing `username` and optional `client_identifier` fields when an additional client identifier constraint is required. Raw tokens are never stored in this map. This fallback is consulted only after Plex identity, shared-resource identity, and shared-server token matching have failed. |
-| REPLEX_CLIENT_IDENTITY_MAP | | Legacy migration fallback for opaque tokens. JSON object mapping `X-Plex-Client-Identifier` values to usernames. Client identifiers are supplied by the caller and are therefore not credentials. Prefer `REPLEX_TOKEN_IDENTITY_MAP`; keep this setting only for clients that cannot yet be migrated. |
-| REPLEX_ALLOW_USERNAME_FALLBACK | false | Last-resort compatibility mode that trusts the client supplied Plex username when every stronger identity method fails. Disabled by default because the header is spoofable. |
-| REPLEX_IDENTITY_CACHE_TTL | 3600 | How long resolved account identities are cached, seconds. This includes Plex-verified, shared-token, and explicitly configured fallback identities. |
-| REPLEX_IDENTITY_API_BASE | https://plex.tv | Identity API override, for testing only. |
+Configuration uses `REPLEX_*` environment variables. Invalid URLs, ports, policy identities, bitrate limits, and disk-cache sizes fail validation at startup.
 
-How it works:
+See [Configuration reference](docs/CONFIGURATION.md) for every setting, default, format, interaction, and runtime status.
 
-* The request's own Plex token is verified against plex.tv first. Server scoped
-  and device scoped shared-user tokens are then resolved through Plex resources
-  and the administrator shared-server list. Only if those methods fail does
-  Replex consult `REPLEX_TOKEN_IDENTITY_MAP` using SHA256 of the request token.
-  The legacy client identifier map comes after that, and the client supplied
-  username is considered only when `REPLEX_ALLOW_USERNAME_FALLBACK=true`.
-* Metadata responses have prohibited versions removed before clients see
-  them; items that only exist above the limit disappear entirely.
-* Playback requests with a version above the limit are rewritten to the best
-  permitted version; transcode fallback can never cross the limit.
-* Direct media part URLs whose cached resolution or source bitrate violates the current policy return 403. For restricted accounts, **unknown** parts (Replex has never classified from metadata/playback) are always blocked. Restricted accounts' part and transcode-session streams are always proxied through Replex, so the client never receives the Plex origin URL.
-* Fully unrestricted accounts, meaning no resolution or bitrate cap, follow `REPLEX_REDIRECT_STREAMS` exactly: `true` redirects stream bytes to the Plex origin, while `false` proxies them through Replex. Identity fail-open uses the same configured transport mode rather than implicitly enabling redirects.
-* Authenticated hub metadata, library payloads and artwork caches are account scoped. Replex deliberately spends additional cache memory so a response fetched by one Plex account can never become an authorisation shortcut for another account. Cached raw library payloads are still re-filtered against the requesting account's current policy on every hit.
+## Security boundary
 
-Requirements and limitations:
+Policies apply only to traffic passing through Replex. A client that reaches Plex directly can bypass metadata filtering, playback rewriting, and direct-part checks.
 
-* All client traffic must flow through Replex. Clients that connect directly
-  to the Plex server bypass every restriction: disable GDM, block direct
-  access where possible, and set Replex as the Custom server access URL
-  (see [Remote access](#remote-access-force-clients-to-use-the-proxy)).
-  See the intent note above: these limits are convenience features — for
-  hard enforcement, restricted clients must have no route to the Plex
-  origin at all.
-* Only invited shared accounts are supported. Home/managed users authenticate
-  differently and are not covered.
-* This restricts which source files may be accessed, it does not transcode a
-  4K file down to 1080p for restricted users.
-* Remote playback quality limits configured inside Plex itself still apply on
-  top of these policies.
-* Per-account `max_bitrate` is incompatible with the global
-  `REPLEX_FORCE_MAXIMUM_QUALITY` — that setting strips bitrate parameters for
-  everyone and will override individual caps. Do not enable both.
+For enforcement:
 
-## Interleaved rows
+- firewall Plex so restricted clients cannot reach it directly;
+- keep stream and part routes behind Replex;
+- keep `REPLEX_REDIRECT_STREAMS=false` for hardened deployments;
+- leave `REPLEX_RESOLUTION_POLICY_FAIL_CLOSED=true`;
+- prefer token-fingerprint identity bindings over client-controlled fallbacks.
 
-Collections hubs with the same name from different libraries will be merged into one on the home screen.
-So an collection hub named "Trending" in the Movie library will be merged with an collection named "Trending" from a shows library on home.
+See [Operations](docs/OPERATIONS.md) for deployment, endpoint, metrics, cache, and troubleshooting guidance.
 
-Note, this does not work on builtin hubs. As i personally dont see then need of mixing those. 
-You can recreate the builtin rows with smart collections if you wish to have that functionality, or with PMM ofcourse.
+## Documentation
 
-## Hub style
+- [Feature behavior](docs/FEATURES.md)
+- [Configuration reference](docs/CONFIGURATION.md)
+- [Operations, security, and diagnostics](docs/OPERATIONS.md)
+- [Example Compose deployment](docker/compose.example.yml)
+- [Example Rhai script](examples/reorder_media.rhai) — retained as an example; scripting is not active in the current pipeline.
 
-For custom collections you can change the hub style to hero by setting the label "REPLEXHERO" on an collection.
+## Compatibility
 
-For built in rows you can use the hubidentifier in the `REPLEX_HERO_ROWS`. See the setting for available know options.
+Hero metadata adapts to Plex Web, iOS, tvOS, Roku, Android, and Android TV. Plexamp and Live TV skip optional presentation rewrites, but security and collection visibility stay active.
 
-Hero style elements use Plex cover art. Replex preserves the rest of Plex's
-native artwork metadata while adding the `coverArt` entry used by hero rows,
-which improves compatibility with current Plex Experience clients that may
-choose artwork differently on different platforms.
+Plex changes private APIs and rendering behavior over time. Validate important clients after Plex server or client upgrades.
 
-Modern Plex Media Server versions can return Continue Watching
-(`home.continue`) as a native `style=hero` hub. Replex keeps that hero style
-and applies the same cover-art transformation to its children, so Continue
-Watching does not need to be recreated as a smart collection on current
-servers. Older Plex clients and server versions can still render hubs
-differently, so client compatibility should be validated when upgrading Plex.
+## Project status
 
-## Exclude watched items
-
-If you want to hide watched items from your hubs, you can set `REPLEX_EXCLUDE_WATCHED` to true. Alternatively, you can add the label "REPLEX_EXCLUDE_WATCHED" to a collection to exclude watched items from that collection only.
-
-## Remote access (force clients to use the proxy)
-
-Because this app sits before Plex the builtin remote access (and auto SSL) will not work and needs to be disabled.
-
-For testing purposes you can access through the browser at http://[replexip]:[replexport] (ex: http://localhost:3001)
-But if you want other clients to connect to replex you need to setup a reverse proxy with a domain and preferable ssl.
-
-A few easy to setup reverse proxys are: https://caddyserver.com or https://nginxproxymanager.com
-
-Once you have your domain hooked up to replex add your replex url to 'Custom server access URLs' field under network.
-and lastly disable remote access under remote access. 
-
-Clear you clients caches to force plex reloading the custom server url
-
-Note: SSL is highly suggested, some clients default to not allowing insecure connections. And some clients dont even support insecure connections (app.plex.tv)
-
-
-## Reverse proxy
-
-Do not bypass Replex for stream paths when per-account resolution or bitrate policies are enabled. Sending these routes directly to Plex skips Replex's direct-part classification and restricted-stream proxy enforcement. Only route them around Replex when the resolution policy feature is disabled and you explicitly accept direct Plex-origin access.
-
-- /video/:/transcode/universal/session
-- /library/parts
-
-## Redirect streams
-
-If you have for example an appbox it might not be ideal to stream media through replex. As that will take a lot of network resources.
-You can redirect fully unrestricted streams by enabling `REPLEX_REDIRECT_STREAMS` and optionally set `REPLEX_REDIRECT_STREAMS_HOST` if it needs to be different from REPLEX_HOST. Accounts with a resolution or bitrate restriction never redirect because doing so would expose a direct path around the policy.
-
-The transport matrix is: restricted account -> proxy; unrestricted account with redirects enabled -> redirect; unrestricted account with redirects disabled -> proxy. When identity fail-open is enabled and identity resolution fails, Replex removes the restriction decision but still follows the configured redirect setting.
-
-For a hardened deployment, keep `REPLEX_REDIRECT_STREAMS=false` and make the Plex origin reachable only from Replex. This keeps every normal client on the Replex or Cloudflare Tunnel path. Enabling redirects is a performance tradeoff for unrestricted accounts and requires those clients to be able to reach the configured Plex redirect origin.
-
-Note: Plex doesnt handle redirects wel, and will not remeber it. So every chuck of a stream will first hit replex and then gets redirected to actuall download that chuck from the redirect url. So a bit wastefull
-
-## Known limitations
-
-- hero hubs on Android devices dont load more content. so hero hubs have a maximum of 100 items on Android.
-- On android mobile hero elements in libraries are slightly cutoff. This is plex limitation.
-- when exclude_watched is true a maximum item limit per library is opposed of 250 items. So if you have a mixed row of 2 libraries the max results of that row will be 500 items.
-- disable_user_state: For movies this works in the webapp. Shows work accross clients
-
-## Help it doesnt work!
-
-### Replex works on on app.plex.tv but not on my clients
-
-- disable GDM in plex and make sure plex is not directly acccesible. you can use this url to check what servers plex communicates to your clients: https://clients.plex.tv/api/v2/resources?includeIPv6=1&includeRelay=1&X-Plex-Language=en-NL&X-Plex-Token=YOURTOKEN&X-Plex-Client-Identifier=1234
-- Try to clear the cache on the client. Old plex domains might linger.
+The original maintainer no longer uses Plex. The project welcomes active maintainers and contributors.

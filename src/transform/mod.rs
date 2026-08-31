@@ -28,38 +28,34 @@ pub use user_state::UserStateTransform;
 
 use crate::{models::*, plex_client::PlexClient};
 
-use async_recursion::async_recursion;
 use async_trait::async_trait;
-use futures_util::{
-    future::{self},
-    StreamExt,
-};
+use futures_util::future::{self};
 use std::sync::Arc;
 
 #[async_trait]
 pub trait Transform: Send + Sync + 'static {
     async fn transform_metadata(
         &self,
-        item: &mut MetaData,
+        _item: &mut MetaData,
         //item: MetaData,
-        plex_client: PlexClient,
-        options: PlexContext,
+        _plex_client: PlexClient,
+        _options: PlexContext,
         //) -> Option<MediaContainer> {
     ) {
     }
     async fn transform_mediacontainer(
         &self,
         item: MediaContainer,
-        plex_client: PlexClient,
-        options: PlexContext,
+        _plex_client: PlexClient,
+        _options: PlexContext,
     ) -> MediaContainer {
         item
     }
     async fn filter_metadata(
         &self,
-        item: &MetaData,
-        plex_client: PlexClient,
-        options: PlexContext,
+        _item: &MetaData,
+        _plex_client: PlexClient,
+        _options: PlexContext,
     ) -> bool {
         true
     }
@@ -97,7 +93,7 @@ impl TransformBuilder {
         self,
         container: &mut MediaContainerWrapper<MediaContainer>,
     ) {
-        let children = container.media_container.children_mut();
+        let _children = container.media_container.children_mut();
         //let new_children = self.apply_to_metadata(children).await;
         //container.media_container.set_children(new_children);
 
@@ -118,9 +114,11 @@ impl TransformBuilder {
 
             // dont use join as it needs ti be executed in order
             // let l = std::cell::RefCell::new(&mut container.media_container);
+            let media_container =
+                std::mem::take(&mut container.media_container);
             container.media_container = t
                 .transform_mediacontainer(
-                    container.media_container.clone(),
+                    media_container,
                     self.plex_client.clone(),
                     self.options.clone(),
                 )
@@ -166,9 +164,11 @@ impl TransformBuilder {
                 index += 1;
             }
 
+            let media_container =
+                std::mem::take(&mut container.media_container);
             container.media_container = t
                 .transform_mediacontainer(
-                    container.media_container.clone(),
+                    media_container,
                     self.plex_client.clone(),
                     self.options.clone(),
                 )

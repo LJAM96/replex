@@ -9,9 +9,11 @@ fn token_fingerprint(token: &str) -> String {
 }
 
 fn client_for(token: Option<&str>) -> PlexClient {
-    let mut context = PlexContext::default();
-    context.token = token.map(|t| t.to_string());
-    context.client_identifier = Some("replex-test".to_string());
+    let context = PlexContext {
+        token: token.map(str::to_string),
+        client_identifier: Some("replex-test".to_string()),
+        ..PlexContext::default()
+    };
     let mut construction_context = context.clone();
     if construction_context.token.is_none() {
         construction_context.token =
@@ -48,6 +50,12 @@ async fn identity_resolution_scenarios() {
 
     let mock = MockServer::start();
     std::env::set_var("REPLEX_IDENTITY_API_BASE", mock.base_url());
+    let root_mock = mock.mock(|when, then| {
+        when.method(GET).path("/");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"MediaContainer":{"machineIdentifier":"test-machine"}}"#);
+    });
 
     // --- valid token resolves identity ---
     let user_mock = mock.mock(|when, then| {
@@ -84,7 +92,7 @@ async fn identity_resolution_scenarios() {
         then.status(401);
     });
 
-    let client = client_for(Some("bad-token"));
+    let client = client_for_host(Some("bad-token"), &mock.base_url());
     match client.get_current_user().await {
         Err(IdentityError::InvalidToken) => {}
         other => {
@@ -147,7 +155,7 @@ async fn identity_resolution_scenarios() {
 
     // --- cached identity survives an upstream outage ---
     // jodie-token is cached from earlier; make plex.tv fail for everyone.
-    let outage = mock.mock(|when, then| {
+    let mut outage = mock.mock(|when, then| {
         when.method(GET)
             .path("/api/v2/user")
             .header("X-Plex-Token", "good-token");
@@ -170,7 +178,7 @@ async fn identity_resolution_scenarios() {
             other.map(|i| i.username)
         ),
     }
-    drop(outage);
+    outage.delete();
 
     // --- shared (server-scoped) token resolves via resources endpoint ---
     // plex.tv /user rejects it; /resources reveals sourceTitle for our
@@ -193,18 +201,12 @@ async fn identity_resolution_scenarios() {
             .body(r#"[{"clientIdentifier":"test-machine","provides":"server","sourceTitle":"jodiemy3","ownerId":839319108,"accessToken":"scoped"}]"#);
     });
 
-    let root_mock = mock.mock(|when, then| {
-        when.method(GET).path("/");
-        then.status(200)
-            .header("content-type", "application/json")
-            .body(r#"{"MediaContainer":{"machineIdentifier":"test-machine"}}"#);
-    });
-
+    let root_hits_before_shared_lookup = root_mock.hits();
     let client = client_for_host(Some("shared-token"), &mock.base_url());
     let identity = client.get_current_user().await.unwrap();
     assert_eq!(identity.username, "jodiemy3");
     assert_eq!(identity.uuid, "shared-jodiemy3");
-    assert_eq!(root_mock.hits(), 1);
+    assert_eq!(root_mock.hits(), root_hits_before_shared_lookup + 1);
     assert_eq!(shared_resources.hits(), 1);
 
     // --- device-scoped shared tokens resolve via admin shared_servers ---
