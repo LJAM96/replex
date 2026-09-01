@@ -1354,14 +1354,25 @@ impl MetaData {
         if !self.is_hub() {
             return Ok(false);
         }
-        // Modern PMS marks Continue Watching and similar rows as hero
-        // natively; honour that flag even when REPLEX_HERO_ROWS is unset,
-        // otherwise clients receive style=hero without the Meta block they
-        // need to actually render it.
+        let config = &plex_client.config;
+        // Explicit opt-out: REPLEX_HERO_ROWS=none/disable/off/"" disables
+        // hero entirely (even PMS-native Continue Watching) to save transform
+        // cost. When unset (None), PMS hero is still honoured as before.
+        if config.hero_rows.as_ref().is_some_and(|rows| {
+            rows.len() == 1
+                && {
+                    let r = rows[0].trim();
+                    r.is_empty()
+                        || r.eq_ignore_ascii_case("none")
+                        || r.eq_ignore_ascii_case("disable")
+                        || r.eq_ignore_ascii_case("off")
+                }
+        }) {
+            return Ok(false);
+        }
         if self.style.as_deref() == Some("hero") {
             return Ok(true);
         }
-        let config = &plex_client.config;
         // dbg!(&config.hero_rows);
         if let (Some(rows), Some(id)) =
             (config.hero_rows.as_ref(), self.hub_identifier.as_ref())
