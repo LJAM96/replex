@@ -231,12 +231,6 @@ impl Transform for HubStyleTransform {
                 }
                 let children: Vec<MetaData> = futures.collect().await;
                 item.set_children(children);
-            } else if item.style.as_deref() == Some("hero") {
-                // Hero explicitly disabled (REPLEX_HERO_ROWS=none) — downgrade
-                // PMS-native hero to shelf so HubKeyTransform uses /replex/shelf
-                // and we avoid building coverArt URLs at all.
-                item.style = Some("shelf".to_string());
-                item.meta = None;
             }
         }
     }

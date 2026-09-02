@@ -1998,8 +1998,7 @@ pub async fn cached_hubs_response(
         .await;
 
     if !compatibility_passthrough {
-        tracing::debug!(hero_rows = ?plex_client.config.hero_rows, "hero check in cached_hubs_response");
-        let mut builder = TransformBuilder::new(plex_client, context.clone())
+        TransformBuilder::new(plex_client, context.clone())
             .with_transform(HubRestrictionTransform)
             .with_transform(HubStyleTransform { is_home: true })
             .with_transform(HubWatchedTransform)
