@@ -282,7 +282,9 @@ async fn warm_paths(client: &PlexClient) -> Vec<String> {
         tracing::warn!("warmer found no library sections");
         return vec![];
     }
-    let joined = all.join(",");
+    let mut sorted_all = all.clone();
+    sorted_all.sort();
+    let joined = sorted_all.join(",");
     let mut paths = vec![
         format!("/hubs/promoted?contentdirectoryid={joined}&pinnedcontentdirectoryid={joined}"),
         "/hubs/home".to_string(),

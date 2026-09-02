@@ -1837,7 +1837,7 @@ pub(crate) fn cache_key_for_request(req: &Request) -> String {
             .or_else(|| queries.get(&name.to_ascii_lowercase()))
     };
 
-    let mut parts: Vec<(&str, &String)> = vec![];
+    let mut parts: Vec<(String, String)> = vec![];
     for name in [
         "contentDirectoryID",
         "pinnedContentDirectoryID",
@@ -1845,12 +1845,26 @@ pub(crate) fn cache_key_for_request(req: &Request) -> String {
         "X-Plex-Container-Size",
     ] {
         if let Some(v) = pick(name) {
-            parts.push((name, v));
+            // Canonicalize comma-separated IDs by sorting so
+            // `23,22,28` and `28,23,22` hit the same cache entry.
+            let sorted = if v.contains(',') {
+                let mut ids: Vec<String> = v
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                ids.sort();
+                ids.join(",")
+            } else {
+                v.clone()
+            };
+            parts.push((name.to_string(), sorted));
         }
     }
     if parts.is_empty() {
         return path.to_string();
     }
+    parts.sort_by(|a, b| a.0.cmp(&b.0));
     let query = parts
         .iter()
         .map(|(k, v)| format!("{}={}", k.to_lowercase(), v))
@@ -1872,9 +1886,21 @@ fn canonical_fetch_path(req: &Request, key_path: &str) -> String {
         ("x-plex-container-size", "X-Plex-Container-Size"),
     ] {
         if let Some(v) = queries.get(orig).or_else(|| queries.get(lower)) {
-            parts.push((orig.to_string(), v.clone()));
+            let sorted = if v.contains(',') {
+                let mut ids: Vec<String> = v
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                ids.sort();
+                ids.join(",")
+            } else {
+                v.clone()
+            };
+            parts.push((orig.to_string(), sorted));
         }
     }
+    parts.sort_by(|a, b| a.0.cmp(&b.0));
     let mut query: Vec<String> =
         parts.iter().map(|(k, v)| format!("{k}={v}")).collect();
     if !query.iter().any(|p| p.starts_with("includeGuids")) {
