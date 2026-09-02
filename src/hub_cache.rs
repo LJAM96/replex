@@ -55,6 +55,14 @@ pub(crate) async fn track_fetched(cache_key: String) {
 /// The warmer must build keys through this same function so warmed entries
 /// land where the matching requests look them up.
 pub fn hub_cache_key(key_path: &str, token: Option<&str>) -> String {
+    // Large merges (promoted/home) are not per-account watch-state sensitive
+    // (Continue Watching is separate) and are filtered per-user via
+    // CollectionVisibilityTransform after fetch. Sharing them globally keeps
+    // all tokens hot after one warm instead of requiring REPLEX_WARM_TOKENS
+    // for every device.
+    if key_path.starts_with("/hubs/promoted") || key_path.starts_with("/hubs/home") {
+        return format!("hubcache:global:{key_path}");
+    }
     match token {
         Some(t) => format!(
             "hubcache:u:{}:{}",
@@ -307,6 +315,8 @@ fn warm_token_list(config: &Config) -> Vec<String> {
 
 /// One warmer pass: for every configured token, pre-fetch that account's hubs
 /// (and poster thumbs) and library sections into the user-scoped cache scope.
+/// Promoted/home are large merges that are now shared globally to keep all
+/// tokens hot after one warm; continueWatching and others remain per-token.
 async fn warm_cycle(state: &AppState) {
     let config = &state.config;
     if config.warm_interval == 0 {
@@ -316,6 +326,29 @@ async fn warm_cycle(state: &AppState) {
     if tokens.is_empty() {
         tracing::debug!("warmer idle: no tokens configured");
         return;
+    }
+    // Warm the heavy global merges once with the admin token (full library
+    // view) so all tokens get a 250ms hit without needing REPLEX_WARM_TOKENS
+    // for every device.
+    if let Some(first_token) = tokens.first() {
+        let context = crate::models::PlexContext {
+            token: Some(first_token.clone()),
+            client_identifier: Some("replex-warmer".to_string()),
+            ..Default::default()
+        };
+        if let Ok(client) = PlexClient::from_context_with_state(&context, state) {
+            let paths = warm_paths(&client).await;
+            let global_paths: Vec<String> = paths
+                .iter()
+                .filter(|p| {
+                    p.starts_with("/hubs/promoted") || p.starts_with("/hubs/home")
+                })
+                .cloned()
+                .collect();
+            if !global_paths.is_empty() {
+                warm_hubs_for_token(&client, &global_paths, first_token).await;
+            }
+        }
     }
     for token in &tokens {
         tracing::debug!(
@@ -338,7 +371,17 @@ async fn warm_cycle(state: &AppState) {
             }
         };
         let paths = warm_paths(&client).await;
-        warm_hubs_for_token(&client, &paths, token).await;
+        // Global promoted/home already warmed above; now warm per-token
+        // continueWatching and per-token promoted slots if any.
+        let per_token_paths: Vec<String> = paths
+            .into_iter()
+            .filter(|p| {
+                !(p.starts_with("/hubs/promoted") || p.starts_with("/hubs/home"))
+            })
+            .collect();
+        if !per_token_paths.is_empty() {
+            warm_hubs_for_token(&client, &per_token_paths, token).await;
+        }
         warm_library_pages(&client, token).await;
     }
 }
