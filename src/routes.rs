@@ -2004,15 +2004,15 @@ pub async fn cached_hubs_response(
             .hero_rows
             .as_ref()
             .is_some_and(|rows| {
-                rows.len() == 1
-                    && {
-                        let r = rows[0].trim();
-                        r.is_empty()
-                            || r.eq_ignore_ascii_case("none")
-                            || r.eq_ignore_ascii_case("disable")
-                            || r.eq_ignore_ascii_case("off")
-                    }
+                rows.iter().any(|r| {
+                    let t = r.trim();
+                    t.is_empty()
+                        || t.eq_ignore_ascii_case("none")
+                        || t.eq_ignore_ascii_case("disable")
+                        || t.eq_ignore_ascii_case("off")
+                })
             });
+        tracing::debug!(hero_rows = ?plex_client.config.hero_rows, hero_disabled, "hero check in cached_hubs_response");
         let mut builder = TransformBuilder::new(plex_client, context.clone())
             .with_transform(HubRestrictionTransform);
         if !hero_disabled {

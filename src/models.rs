@@ -1359,14 +1359,13 @@ impl MetaData {
         // hero entirely (even PMS-native Continue Watching) to save transform
         // cost. When unset (None), PMS hero is still honoured as before.
         if config.hero_rows.as_ref().is_some_and(|rows| {
-            rows.len() == 1
-                && {
-                    let r = rows[0].trim();
-                    r.is_empty()
-                        || r.eq_ignore_ascii_case("none")
-                        || r.eq_ignore_ascii_case("disable")
-                        || r.eq_ignore_ascii_case("off")
-                }
+            rows.iter().any(|r| {
+                let t = r.trim();
+                t.is_empty()
+                    || t.eq_ignore_ascii_case("none")
+                    || t.eq_ignore_ascii_case("disable")
+                    || t.eq_ignore_ascii_case("off")
+            })
         }) {
             return Ok(false);
         }
