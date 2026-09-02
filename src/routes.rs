@@ -1998,27 +1998,10 @@ pub async fn cached_hubs_response(
         .await;
 
     if !compatibility_passthrough {
-        // Skip hero entirely when REPLEX_HERO_ROWS=none/off/disable
-        let hero_disabled = plex_client
-            .config
-            .hero_rows
-            .as_ref()
-            .is_some_and(|rows| {
-                rows.iter().any(|r| {
-                    let t = r.trim();
-                    t.is_empty()
-                        || t.eq_ignore_ascii_case("none")
-                        || t.eq_ignore_ascii_case("disable")
-                        || t.eq_ignore_ascii_case("off")
-                })
-            });
-        tracing::debug!(hero_rows = ?plex_client.config.hero_rows, hero_disabled, "hero check in cached_hubs_response");
+        tracing::debug!(hero_rows = ?plex_client.config.hero_rows, "hero check in cached_hubs_response");
         let mut builder = TransformBuilder::new(plex_client, context.clone())
-            .with_transform(HubRestrictionTransform);
-        if !hero_disabled {
-            builder = builder.with_transform(HubStyleTransform { is_home: true });
-        }
-        builder
+            .with_transform(HubRestrictionTransform)
+            .with_transform(HubStyleTransform { is_home: true })
             .with_transform(HubWatchedTransform)
             .with_transform(HubInterleaveTransform)
             .with_transform(UserStateTransform)
